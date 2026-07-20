@@ -1,0 +1,7 @@
+build/
+input/
+output/
+*.step
+*.stp
+*.json
+.git/

@@ -1,0 +1,13 @@
+name: seksun-occt
+
+services:
+  analyzer:
+    build:
+      context: .
+    image: seksun/occt-analyzer:0.1.0
+    volumes:
+      - ./input:/data/input:ro
+      - ./output:/data/output
+    command:
+      - /data/input/test.stp
+      - /data/output/result.json

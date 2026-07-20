@@ -9,6 +9,7 @@
 #include <TopExp.hxx>
 #include <TopTools_IndexedMapOfShape.hxx>
 #include <TopoDS_Shape.hxx>
+#include <gp_Pnt.hxx>
 
 #include <filesystem>
 #include <fstream>
@@ -37,6 +38,12 @@ struct Bounds {
     double x_max = 0.0;
     double y_max = 0.0;
     double z_max = 0.0;
+};
+
+struct Point3 {
+    double x = 0.0;
+    double y = 0.0;
+    double z = 0.0;
 };
 
 int count_subshapes(const TopoDS_Shape& shape, TopAbs_ShapeEnum kind) {
@@ -75,6 +82,7 @@ std::string make_json(
     const Counts& counts,
     double surface_area,
     double volume,
+    const Point3& center_of_mass,
     const Bounds& bounds) {
     std::ostringstream json;
     json << std::fixed << std::setprecision(6);
@@ -92,6 +100,10 @@ std::string make_json(
          << "  \"measurements\": {\n"
          << "    \"surface_area\": " << surface_area << ",\n"
          << "    \"volume\": " << volume << ",\n"
+         << "    \"center_of_mass\": ["
+         << center_of_mass.x << ", "
+         << center_of_mass.y << ", "
+         << center_of_mass.z << "],\n"
          << "    \"bounding_box\": {\n"
          << "      \"min\": [" << bounds.x_min << ", " << bounds.y_min << ", " << bounds.z_min << "],\n"
          << "      \"max\": [" << bounds.x_max << ", " << bounds.y_max << ", " << bounds.z_max << "],\n"
@@ -168,8 +180,15 @@ int main(int argc, char* argv[]) {
         GProp_GProps volume_properties;
         BRepGProp::VolumeProperties(shape, volume_properties);
 
+        const gp_Pnt center = volume_properties.CentreOfMass();
+        const Point3 center_of_mass{center.X(), center.Y(), center.Z()};
+
         Bnd_Box box;
-        BRepBndLib::Add(shape, box, Standard_True);
+        BRepBndLib::AddOptimal(
+            shape,
+            box,
+            Standard_False,
+            Standard_False);
         if (box.IsVoid()) {
             throw std::runtime_error("Cannot calculate the model bounding box");
         }
@@ -188,6 +207,7 @@ int main(int argc, char* argv[]) {
             counts,
             surface_properties.Mass(),
             volume_properties.Mass(),
+            center_of_mass,
             bounds);
 
         if (!output.empty()) {

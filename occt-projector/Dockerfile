@@ -1,0 +1,49 @@
+FROM ubuntu:24.04 AS builder
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        build-essential \
+        cmake \
+        ninja-build \
+        nlohmann-json3-dev \
+        libocct-data-exchange-dev \
+        libocct-modeling-algorithms-dev \
+        libocct-ocaf-dev \
+        libocct-visualization-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends libtbb-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /src
+COPY CMakeLists.txt ./
+COPY src ./src
+
+RUN cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
+    && cmake --build build --parallel \
+    && cmake --install build --prefix /opt/occt-projector
+
+FROM ubuntu:24.04 AS runtime
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        libocct-data-exchange-7.6t64 \
+        libocct-modeling-algorithms-7.6t64 \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=builder /opt/occt-projector/bin/occt-projector /usr/local/bin/occt-projector
+
+RUN useradd --system --uid 10001 --create-home projector \
+    && mkdir -p /data/input /data/output \
+    && chown -R projector:projector /data/output
+
+USER projector
+WORKDIR /data
+
+ENTRYPOINT ["/usr/local/bin/occt-projector"]
+CMD ["/data/input/test.stp", "/data/output"]

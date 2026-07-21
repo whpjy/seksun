@@ -1,0 +1,15 @@
+name: seksun-occt-projector
+
+services:
+  projector:
+    build:
+      context: .
+    image: seksun/occt-projector:0.1.0
+    volumes:
+      - ../occt-analyzer/input:/data/input:ro
+      - ../occt-analyzer/output:/data/analysis:ro
+      - ./output:/data/output
+    command:
+      - /data/input/0204865PZ9.001-IF plate with gasket assy.stp
+      - /data/output
+      - /data/analysis/0204865PZ9.001-IF plate with gasket assy.json

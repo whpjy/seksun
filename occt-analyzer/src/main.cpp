@@ -3,6 +3,7 @@
 #include <BRepAdaptor_Surface.hxx>
 #include <BRepBndLib.hxx>
 #include <BRepGProp.hxx>
+#include <BRepTools.hxx>
 #include <GeomAbs_SurfaceType.hxx>
 #include <GProp_GProps.hxx>
 #include <IFSelect_ReturnStatus.hxx>
@@ -11,12 +12,15 @@
 #include <TopAbs_Orientation.hxx>
 #include <TopAbs_ShapeEnum.hxx>
 #include <TopExp.hxx>
+#include <TopExp_Explorer.hxx>
 #include <TopTools_IndexedMapOfShape.hxx>
 #include <TopoDS.hxx>
 #include <TopoDS_Edge.hxx>
 #include <TopoDS_Face.hxx>
 #include <TopoDS_Shape.hxx>
+#include <TopoDS_Wire.hxx>
 #include <gp_Cylinder.hxx>
+#include <gp_Circ.hxx>
 #include <gp_Dir.hxx>
 #include <gp_Pnt.hxx>
 #include <gp_Pln.hxx>
@@ -25,6 +29,7 @@
 #include <algorithm>
 #include <cmath>
 #include <filesystem>
+#include <functional>
 #include <fstream>
 #include <iomanip>
 #include <iostream>
@@ -115,6 +120,23 @@ struct AxialFeature {
     std::vector<CylinderPatch> segments;
 };
 
+struct StudFeature {
+    std::string id;
+    std::string type;
+    Point3 axis;
+    Point3 axis_point;
+    std::vector<Point3> centers;
+    std::vector<std::string> feature_ids;
+    std::vector<std::string> body_ids;
+    double overall_length = 0.0;
+    double nominal_shaft_diameter = 0.0;
+    double head_diameter = 0.0;
+    double tip_diameter = 0.0;
+    std::string assessment = "NOT_IDENTIFIED";
+    std::vector<double> diameters;
+    std::vector<CylinderPatch> segments;
+};
+
 struct HoleAxisGroup {
     std::string id;
     std::string type;
@@ -138,9 +160,27 @@ struct HolePattern {
     std::vector<std::string> group_ids;
 };
 
+struct DatumDimension {
+    std::string id;
+    std::string feature_id;
+    std::string axis;
+    std::string datum;
+    double coordinate = 0.0;
+    double value = 0.0;
+};
+
+struct PlanarOpening {
+    std::string id;
+    Point3 normal;
+    Bounds bounds;
+    int source_wires = 1;
+    int edges = 0;
+};
+
 struct PlaneGroup {
     Point3 normal;
     double offset = 0.0;
+    Point3 centroid;
     double area = 0.0;
     int faces = 0;
 };
@@ -171,6 +211,7 @@ struct ThicknessAnalysis {
     int dominant_evidence = 0;
     std::string assessment = "NOT_IDENTIFIED";
     std::vector<ThicknessCandidate> candidates;
+    std::vector<PlanePair> dominant_pairs;
 };
 
 struct TorusRadiusPair {
@@ -181,6 +222,15 @@ struct TorusRadiusPair {
     int outer_faces = 0;
     int estimated_pairs = 0;
     bool ambiguous = false;
+};
+
+struct TorusPatch {
+    std::string face_id;
+    Point3 center;
+    Point3 axis;
+    Point3 surface_point;
+    double major_radius = 0.0;
+    double minor_radius = 0.0;
 };
 
 struct BendRadiusGroup {
@@ -199,6 +249,7 @@ struct BendRadiusPair {
 
 struct RadiusPairAnalysis {
     std::vector<TorusRadiusPair> torus_pairs;
+    std::vector<TorusPatch> torus_patches;
     std::vector<BendRadiusGroup> bend_groups;
     std::vector<BendRadiusPair> bend_pairs;
 };
@@ -219,6 +270,34 @@ constexpr double AxisCosine = 0.999;
 constexpr double PositionTolerance = 0.05;
 constexpr double DiameterTolerance = 0.02;
 constexpr double Pi = 3.14159265358979323846;
+
+std::vector<DatumDimension> build_datum_dimensions(
+    const std::vector<HoleAxisGroup>& groups,
+    const Bounds& bounds) {
+    std::vector<DatumDimension> dimensions;
+    int index = 1;
+    for (const HoleAxisGroup& group : groups) {
+        if (std::abs(group.axis.y) < 0.98) continue;
+        DatumDimension x;
+        x.id = "DX" + std::to_string(index++);
+        x.feature_id = group.id;
+        x.axis = "X";
+        x.datum = "LEFT_EDGE";
+        x.coordinate = group.center.x;
+        x.value = group.center.x - bounds.x_min;
+        dimensions.push_back(x);
+
+        DatumDimension z;
+        z.id = "DZ" + std::to_string(index++);
+        z.feature_id = group.id;
+        z.axis = "Z";
+        z.datum = "BOTTOM_EDGE";
+        z.coordinate = group.center.z;
+        z.value = group.center.z - bounds.z_min;
+        dimensions.push_back(z);
+    }
+    return dimensions;
+}
 
 std::string json_escape(const std::string& value);
 double interval_gap(
@@ -349,6 +428,131 @@ void analyze_radius_groups(
     }
 }
 
+bool is_circular_wire(const TopoDS_Wire& wire) {
+    bool has_circle = false;
+    gp_Pnt reference_center;
+    double reference_radius = 0.0;
+    for (TopExp_Explorer explorer(wire, TopAbs_EDGE);
+         explorer.More(); explorer.Next()) {
+        const TopoDS_Edge edge = TopoDS::Edge(explorer.Current());
+        const BRepAdaptor_Curve curve(edge);
+        if (curve.GetType() != GeomAbs_Circle) {
+            return false;
+        }
+        const gp_Circ circle = curve.Circle();
+        if (!has_circle) {
+            has_circle = true;
+            reference_center = circle.Location();
+            reference_radius = circle.Radius();
+        } else if (reference_center.Distance(circle.Location()) > 0.02 ||
+                   std::abs(reference_radius - circle.Radius()) > 0.02) {
+            return false;
+        }
+    }
+    return has_circle;
+}
+
+bool same_opening(const PlanarOpening& left, const PlanarOpening& right) {
+    const double tolerance = 0.05;
+    return std::abs(dot(left.normal, right.normal)) >= 0.99999 &&
+           std::abs(left.bounds.x_min - right.bounds.x_min) <= tolerance &&
+           std::abs(left.bounds.y_min - right.bounds.y_min) <= tolerance &&
+           std::abs(left.bounds.z_min - right.bounds.z_min) <= tolerance &&
+           std::abs(left.bounds.x_max - right.bounds.x_max) <= tolerance &&
+           std::abs(left.bounds.y_max - right.bounds.y_max) <= tolerance &&
+           std::abs(left.bounds.z_max - right.bounds.z_max) <= tolerance;
+}
+
+std::vector<PlanarOpening> collect_planar_openings(
+    const TopoDS_Shape& shape) {
+    std::vector<PlanarOpening> openings;
+    TopTools_IndexedMapOfShape faces;
+    TopExp::MapShapes(shape, TopAbs_FACE, faces);
+    for (Standard_Integer face_index = 1;
+         face_index <= faces.Extent(); ++face_index) {
+        const TopoDS_Face face = TopoDS::Face(faces(face_index));
+        const BRepAdaptor_Surface surface(face, Standard_True);
+        if (surface.GetType() != GeomAbs_Plane) {
+            continue;
+        }
+        const Point3 normal = canonical(surface.Plane().Axis().Direction());
+        const TopoDS_Wire outer = BRepTools::OuterWire(face);
+        for (TopExp_Explorer explorer(face, TopAbs_WIRE);
+             explorer.More(); explorer.Next()) {
+            const TopoDS_Wire wire = TopoDS::Wire(explorer.Current());
+            if ((!outer.IsNull() && wire.IsSame(outer)) ||
+                is_circular_wire(wire)) {
+                continue;
+            }
+
+            int edge_count = 0;
+            for (TopExp_Explorer edge_explorer(wire, TopAbs_EDGE);
+                 edge_explorer.More(); edge_explorer.Next()) {
+                ++edge_count;
+            }
+            if (edge_count < 2) {
+                continue;
+            }
+
+            Bnd_Box box;
+            BRepBndLib::AddOptimal(
+                wire, box, Standard_False, Standard_False);
+            if (box.IsVoid()) {
+                continue;
+            }
+            PlanarOpening opening;
+            opening.normal = normal;
+            opening.edges = edge_count;
+            box.Get(
+                opening.bounds.x_min,
+                opening.bounds.y_min,
+                opening.bounds.z_min,
+                opening.bounds.x_max,
+                opening.bounds.y_max,
+                opening.bounds.z_max);
+
+            PlanarOpening* duplicate = nullptr;
+            for (PlanarOpening& existing : openings) {
+                if (same_opening(existing, opening)) {
+                    duplicate = &existing;
+                    break;
+                }
+            }
+            if (duplicate == nullptr) {
+                openings.push_back(opening);
+            } else {
+                ++duplicate->source_wires;
+                duplicate->edges = std::max(duplicate->edges, edge_count);
+            }
+        }
+    }
+
+    std::sort(
+        openings.begin(), openings.end(),
+        [](const PlanarOpening& left, const PlanarOpening& right) {
+            const std::vector<double> left_spans = {
+                left.bounds.x_max - left.bounds.x_min,
+                left.bounds.y_max - left.bounds.y_min,
+                left.bounds.z_max - left.bounds.z_min};
+            const std::vector<double> right_spans = {
+                right.bounds.x_max - right.bounds.x_min,
+                right.bounds.y_max - right.bounds.y_min,
+                right.bounds.z_max - right.bounds.z_min};
+            std::vector<double> left_sorted = left_spans;
+            std::vector<double> right_sorted = right_spans;
+            std::sort(left_sorted.begin(), left_sorted.end(), std::greater<double>());
+            std::sort(right_sorted.begin(), right_sorted.end(), std::greater<double>());
+            return left_sorted[0] * left_sorted[1] >
+                   right_sorted[0] * right_sorted[1];
+        });
+    for (std::size_t index = 0; index < openings.size(); ++index) {
+        std::ostringstream id;
+        id << "OP" << std::setw(3) << std::setfill('0') << index + 1;
+        openings[index].id = id.str();
+    }
+    return openings;
+}
+
 std::string axis_category(const Point3& normal) {
     if (std::abs(normal.x) >= 0.999) return "X";
     if (std::abs(normal.y) >= 0.999) return "Y";
@@ -374,6 +578,8 @@ std::vector<PlaneGroup> collect_plane_groups(const TopoDS_Shape& shape) {
         GProp_GProps properties;
         BRepGProp::SurfaceProperties(face, properties);
         const double area = properties.Mass();
+        const gp_Pnt center = properties.CentreOfMass();
+        const Point3 centroid{center.X(), center.Y(), center.Z()};
         const double offset = dot(normal, point);
 
         PlaneGroup* target = nullptr;
@@ -385,8 +591,14 @@ std::vector<PlaneGroup> collect_plane_groups(const TopoDS_Shape& shape) {
             }
         }
         if (target == nullptr) {
-            groups.push_back(PlaneGroup{normal, offset, 0.0, 0});
+            groups.push_back(PlaneGroup{normal, offset, {}, 0.0, 0});
             target = &groups.back();
+        }
+        const double combinedArea = target->area + area;
+        if (combinedArea > Epsilon) {
+            target->centroid =
+                (target->centroid * target->area + centroid * area) *
+                (1.0 / combinedArea);
         }
         target->area += area;
         ++target->faces;
@@ -513,6 +725,12 @@ ThicknessAnalysis analyze_thickness(const TopoDS_Shape& shape) {
         }
     }
 
+    for (const PlanePair& pair : pairs) {
+        if (std::abs(pair.distance - analysis.dominant_thickness) <= 0.002) {
+            analysis.dominant_pairs.push_back(pair);
+        }
+    }
+
     if (analysis.dominant_thickness <= Epsilon) {
         analysis.assessment = "NOT_IDENTIFIED";
     } else if (analysis.dominant_thickness >
@@ -580,6 +798,37 @@ std::vector<TorusRadiusPair> find_torus_radius_pairs(
             return left.inner_radius < right.inner_radius;
         });
     return pairs;
+}
+
+std::vector<TorusPatch> collect_torus_patches(const TopoDS_Shape& shape) {
+    std::vector<TorusPatch> patches;
+    TopTools_IndexedMapOfShape faces;
+    TopExp::MapShapes(shape, TopAbs_FACE, faces);
+    for (Standard_Integer index = 1; index <= faces.Extent(); ++index) {
+        const TopoDS_Face face = TopoDS::Face(faces(index));
+        const BRepAdaptor_Surface surface(face, Standard_True);
+        if (surface.GetType() != GeomAbs_Torus) {
+            continue;
+        }
+
+        const gp_Torus torus = surface.Torus();
+        const gp_Pnt center = torus.Location();
+        const gp_Dir axis = torus.Axis().Direction();
+        GProp_GProps properties;
+        BRepGProp::SurfaceProperties(face, properties);
+        const gp_Pnt surfacePoint = properties.CentreOfMass();
+
+        std::ostringstream faceId;
+        faceId << 'F' << std::setw(4) << std::setfill('0') << index;
+        patches.push_back(TorusPatch{
+            faceId.str(),
+            {center.X(), center.Y(), center.Z()},
+            canonical(axis),
+            {surfacePoint.X(), surfacePoint.Y(), surfacePoint.Z()},
+            torus.MajorRadius(),
+            torus.MinorRadius()});
+    }
+    return patches;
 }
 
 std::vector<BendRadiusGroup> collect_bend_radius_groups(
@@ -676,6 +925,7 @@ RadiusPairAnalysis analyze_radius_pairs(
     analysis.torus_pairs = find_torus_radius_pairs(
         torus_groups,
         thickness.dominant_thickness);
+    analysis.torus_patches = collect_torus_patches(shape);
     analysis.bend_groups = collect_bend_radius_groups(shape);
     analysis.bend_pairs = find_bend_radius_pairs(
         analysis.bend_groups,
@@ -995,6 +1245,92 @@ std::vector<AxialFeature> build_axial_features(
     return features;
 }
 
+std::vector<StudFeature> build_stud_features(
+    const std::vector<AxialFeature>& features) {
+    struct Bucket { Point3 axis; Point3 center; std::vector<const AxialFeature*> items; };
+    std::vector<Bucket> buckets;
+    for (const AxialFeature& feature : features) {
+        if (feature.type.find("EXTERNAL_CYLINDER") == std::string::npos ||
+            std::abs(feature.axis.y) < 0.98) continue;
+        if (feature.diameters.empty()) continue;
+        auto found = std::find_if(
+            buckets.begin(), buckets.end(),
+            [&feature](const Bucket& bucket) {
+                if (std::abs(dot(bucket.axis, feature.axis)) < AxisCosine) return false;
+                const Point3 delta = feature.center - bucket.center;
+                const Point3 radial = delta - bucket.axis * dot(delta, bucket.axis);
+                return length(radial) <= PositionTolerance;
+            });
+        if (found == buckets.end()) {
+            buckets.push_back({feature.axis, feature.center, {&feature}});
+        } else {
+            found->items.push_back(&feature);
+        }
+    }
+
+    std::vector<StudFeature> result;
+    int number = 0;
+    for (const Bucket& bucket : buckets) {
+        if (bucket.items.size() < 2) continue;
+        StudFeature stud;
+        std::ostringstream id;
+        id << "SF" << std::setw(3) << std::setfill('0') << ++number;
+        stud.id = id.str();
+        stud.type = "STEPPED_STUD";
+        stud.axis = bucket.axis;
+        stud.axis_point = bucket.center -
+            bucket.axis * dot(bucket.center, bucket.axis);
+        double minimum = std::numeric_limits<double>::infinity();
+        double maximum = -std::numeric_limits<double>::infinity();
+        for (const AxialFeature* feature : bucket.items) {
+            stud.feature_ids.push_back(feature->id);
+            if (std::find(stud.body_ids.begin(), stud.body_ids.end(), feature->body_id) == stud.body_ids.end()) {
+                stud.body_ids.push_back(feature->body_id);
+            }
+            stud.centers.push_back(feature->center);
+            minimum = std::min(minimum, dot(feature->start, stud.axis));
+            minimum = std::min(minimum, dot(feature->end, stud.axis));
+            maximum = std::max(maximum, dot(feature->start, stud.axis));
+            maximum = std::max(maximum, dot(feature->end, stud.axis));
+            for (double diameter : feature->diameters) add_unique_diameter(stud.diameters, diameter);
+            stud.segments.insert(stud.segments.end(), feature->segments.begin(), feature->segments.end());
+        }
+        stud.overall_length = maximum - minimum;
+        std::sort(stud.diameters.begin(), stud.diameters.end());
+        if (!stud.diameters.empty()) {
+            stud.tip_diameter = stud.diameters.front();
+            stud.head_diameter = stud.diameters.back();
+        }
+        const auto longest = std::max_element(
+            stud.segments.begin(), stud.segments.end(),
+            [](const CylinderPatch& left, const CylinderPatch& right) {
+                return left.maximum_station - left.minimum_station <
+                       right.maximum_station - right.minimum_station;
+            });
+        if (longest != stud.segments.end()) {
+            stud.nominal_shaft_diameter = longest->diameter;
+        }
+        const bool has_diameter_step =
+            stud.diameters.size() >= 2 &&
+            stud.nominal_shaft_diameter > Epsilon &&
+            stud.head_diameter >= stud.nominal_shaft_diameter * 1.15;
+        if (!has_diameter_step) {
+            continue;
+        }
+        std::sort(
+            stud.segments.begin(), stud.segments.end(),
+            [](const CylinderPatch& left, const CylinderPatch& right) {
+                return left.minimum_station < right.minimum_station;
+            });
+        stud.assessment =
+            bucket.items.size() >= 4 && stud.diameters.size() >= 4
+                ? "HIGH_CONFIDENCE_STEPPED_STUD"
+                : "STEPPED_STUD_CANDIDATE";
+        result.push_back(std::move(stud));
+    }
+    return result;
+}
+
 std::vector<HoleAxisGroup> build_hole_axis_groups(
     const std::vector<AxialFeature>& features) {
     std::vector<HoleAxisGroup> groups;
@@ -1272,6 +1608,62 @@ void append_axial_features(
 
 void append_string_array(
     std::ostringstream& json,
+    const std::vector<std::string>& values);
+
+void append_stud_features(
+    std::ostringstream& json,
+    const std::vector<StudFeature>& studs) {
+    json << "[";
+    if (!studs.empty()) json << '\n';
+    for (std::size_t index = 0; index < studs.size(); ++index) {
+        const StudFeature& stud = studs[index];
+        json << "    {\"id\": \"" << stud.id
+             << "\", \"type\": \"" << stud.type
+             << "\", \"axis\": ";
+        append_point(json, stud.axis);
+        json << ", \"axis_point\": ";
+        append_point(json, stud.axis_point);
+        json << ", \"count\": " << stud.centers.size()
+             << ", \"centers\": [";
+        for (std::size_t center = 0; center < stud.centers.size(); ++center) {
+            if (center > 0) json << ", ";
+            append_point(json, stud.centers[center]);
+        }
+        json << "], \"feature_ids\": ";
+        append_string_array(json, stud.feature_ids);
+        json << ", \"body_ids\": ";
+        append_string_array(json, stud.body_ids);
+        json << ", \"overall_length\": " << stud.overall_length
+             << ", \"nominal_shaft_diameter\": "
+             << stud.nominal_shaft_diameter
+             << ", \"head_diameter\": " << stud.head_diameter
+             << ", \"tip_diameter\": " << stud.tip_diameter
+             << ", \"assessment\": \"" << stud.assessment << "\""
+             << ", \"diameters\": [";
+        for (std::size_t diameter = 0; diameter < stud.diameters.size(); ++diameter) {
+            if (diameter > 0) json << ", ";
+            json << stud.diameters[diameter];
+        }
+        json << "], \"segments\": [";
+        for (std::size_t segment = 0; segment < stud.segments.size(); ++segment) {
+            const CylinderPatch& patch = stud.segments[segment];
+            if (segment > 0) json << ", ";
+            json << "{\"face_id\": \"" << patch.face_id
+                 << "\", \"diameter\": " << patch.diameter
+                 << ", \"length\": "
+                 << patch.maximum_station - patch.minimum_station
+                 << ", \"start_station\": " << patch.minimum_station
+                 << ", \"end_station\": " << patch.maximum_station
+                 << "}";
+        }
+        json << "]}" << (index + 1 < studs.size() ? "," : "") << '\n';
+    }
+    if (!studs.empty()) json << "  ";
+    json << "]";
+}
+
+void append_string_array(
+    std::ostringstream& json,
     const std::vector<std::string>& values) {
     json << '[';
     for (std::size_t index = 0; index < values.size(); ++index) {
@@ -1348,6 +1740,47 @@ void append_hole_patterns(
     json << "  ]";
 }
 
+void append_datum_dimensions(
+    std::ostringstream& json,
+    const std::vector<DatumDimension>& dimensions) {
+    json << "[";
+    if (!dimensions.empty()) json << '\n';
+    for (std::size_t index = 0; index < dimensions.size(); ++index) {
+        const DatumDimension& dimension = dimensions[index];
+        json << "    {\"id\": \"" << dimension.id
+             << "\", \"feature_id\": \"" << dimension.feature_id
+             << "\", \"axis\": \"" << dimension.axis
+             << "\", \"datum\": \"" << dimension.datum
+             << "\", \"coordinate\": " << dimension.coordinate
+             << ", \"value\": " << dimension.value << "}"
+             << (index + 1 < dimensions.size() ? "," : "") << '\n';
+    }
+    if (!dimensions.empty()) json << "  ";
+    json << "]";
+}
+
+void append_planar_openings(
+    std::ostringstream& json,
+    const std::vector<PlanarOpening>& openings) {
+    json << "[";
+    if (!openings.empty()) json << '\n';
+    for (std::size_t index = 0; index < openings.size(); ++index) {
+        const PlanarOpening& opening = openings[index];
+        json << "    {\"id\": \"" << opening.id
+             << "\", \"normal\": [" << opening.normal.x << ", "
+             << opening.normal.y << ", " << opening.normal.z
+             << "], \"min\": [" << opening.bounds.x_min << ", "
+             << opening.bounds.y_min << ", " << opening.bounds.z_min
+             << "], \"max\": [" << opening.bounds.x_max << ", "
+             << opening.bounds.y_max << ", " << opening.bounds.z_max
+             << "], \"source_wires\": " << opening.source_wires
+             << ", \"edges\": " << opening.edges << '}'
+             << (index + 1 < openings.size() ? "," : "") << '\n';
+    }
+    if (!openings.empty()) json << "  ";
+    json << ']';
+}
+
 void append_thickness_analysis(
     std::ostringstream& json,
     const ThicknessAnalysis& analysis,
@@ -1376,6 +1809,28 @@ void append_thickness_analysis(
              << '\n';
     }
     if (!analysis.candidates.empty()) json << indent << "  ";
+    json << "],\n"
+         << indent << "  \"dominant_pairs\": [";
+    if (!analysis.dominant_pairs.empty()) json << '\n';
+    for (std::size_t index = 0;
+         index < analysis.dominant_pairs.size();
+         ++index) {
+        const PlanePair& pair = analysis.dominant_pairs[index];
+        json << indent << "    {\"normal\": ["
+             << pair.first.normal.x << ", " << pair.first.normal.y << ", "
+             << pair.first.normal.z << "], \"first_offset\": "
+             << pair.first.offset << ", \"second_offset\": "
+             << pair.second.offset << ", \"first_centroid\": ["
+             << pair.first.centroid.x << ", " << pair.first.centroid.y << ", "
+             << pair.first.centroid.z << "], \"second_centroid\": ["
+             << pair.second.centroid.x << ", " << pair.second.centroid.y << ", "
+             << pair.second.centroid.z << "], \"distance\": "
+             << pair.distance << ", \"first_area\": " << pair.first.area
+             << ", \"second_area\": " << pair.second.area << '}'
+             << (index + 1 < analysis.dominant_pairs.size() ? "," : "")
+             << '\n';
+    }
+    if (!analysis.dominant_pairs.empty()) json << indent << "  ";
     json << "]\n" << indent << '}';
 }
 
@@ -1400,6 +1855,26 @@ void append_radius_pair_analysis(
              << '\n';
     }
     if (!analysis.torus_pairs.empty()) json << indent << "  ";
+    json << "],\n"
+         << indent << "  \"torus_patches\": [";
+    if (!analysis.torus_patches.empty()) json << '\n';
+    for (std::size_t index = 0;
+         index < analysis.torus_patches.size();
+         ++index) {
+        const TorusPatch& patch = analysis.torus_patches[index];
+        json << indent << "    {\"face_id\": \"" << patch.face_id
+             << "\", \"center\": [" << patch.center.x << ", "
+             << patch.center.y << ", " << patch.center.z
+             << "], \"axis\": [" << patch.axis.x << ", "
+             << patch.axis.y << ", " << patch.axis.z
+             << "], \"surface_point\": [" << patch.surface_point.x << ", "
+             << patch.surface_point.y << ", " << patch.surface_point.z
+             << "], \"major_radius\": " << patch.major_radius
+             << ", \"minor_radius\": " << patch.minor_radius << '}'
+             << (index + 1 < analysis.torus_patches.size() ? "," : "")
+             << '\n';
+    }
+    if (!analysis.torus_patches.empty()) json << indent << "  ";
     json << "],\n"
          << indent << "  \"bend_groups\": [";
     if (!analysis.bend_groups.empty()) json << '\n';
@@ -1465,8 +1940,11 @@ std::string make_json(
     const SurfaceCounts& surface_counts,
     const std::vector<BodySurfaceSummary>& bodies,
     const std::vector<AxialFeature>& axial_features,
+    const std::vector<StudFeature>& stud_features,
     const std::vector<HoleAxisGroup>& hole_axis_groups,
     const std::vector<HolePattern>& hole_patterns,
+    const std::vector<DatumDimension>& datum_dimensions,
+    const std::vector<PlanarOpening>& planar_openings,
     const ThicknessAnalysis& thickness_analysis,
     const RadiusPairAnalysis& radius_pair_analysis,
     double surface_area,
@@ -1476,7 +1954,7 @@ std::string make_json(
     std::ostringstream json;
     json << std::fixed << std::setprecision(6);
     json << "{\n"
-             << "  \"schema_version\": \"0.8.1\",\n"
+             << "  \"schema_version\": \"0.16.0\",\n"
          << "  \"source_file\": \"" << json_escape(input.filename().string()) << "\",\n"
          << "  \"units\": {\"length\": \"mm\", \"area\": \"mm^2\", \"volume\": \"mm^3\"},\n"
          << "  \"topology\": {\n"
@@ -1515,11 +1993,20 @@ std::string make_json(
          << "  \"axial_features\": ";
     append_axial_features(json, axial_features);
     json << ",\n"
+         << "  \"stud_features\": ";
+    append_stud_features(json, stud_features);
+    json << ",\n"
          << "  \"hole_axis_groups\": ";
     append_hole_axis_groups(json, hole_axis_groups);
     json << ",\n"
          << "  \"hole_patterns\": ";
     append_hole_patterns(json, hole_patterns);
+    json << ",\n"
+         << "  \"datum_dimensions\": ";
+    append_datum_dimensions(json, datum_dimensions);
+    json << ",\n"
+         << "  \"planar_openings\": ";
+    append_planar_openings(json, planar_openings);
     json << ",\n"
          << "  \"thickness_analysis\": ";
     append_thickness_analysis(json, thickness_analysis, "  ");
@@ -1610,10 +2097,14 @@ int main(int argc, char* argv[]) {
             collect_full_cylinder_patches(shape);
         const std::vector<AxialFeature> axial_features =
             build_axial_features(full_cylinder_patches);
+        const std::vector<StudFeature> stud_features =
+            build_stud_features(axial_features);
         const std::vector<HoleAxisGroup> hole_axis_groups =
             build_hole_axis_groups(axial_features);
         const std::vector<HolePattern> hole_patterns =
             build_hole_patterns(hole_axis_groups);
+        const std::vector<PlanarOpening> planar_openings =
+            collect_planar_openings(shape);
         const ThicknessAnalysis thickness_analysis = analyze_thickness(shape);
         std::vector<CylinderRadiusGroup> global_cylinder_groups;
         std::vector<TorusRadiusGroup> global_torus_groups;
@@ -1654,14 +2145,20 @@ int main(int argc, char* argv[]) {
             bounds.y_max,
             bounds.z_max);
 
+        const std::vector<DatumDimension> datum_dimensions =
+            build_datum_dimensions(hole_axis_groups, bounds);
+
         const std::string result = make_json(
             input,
             counts,
             surface_counts,
             bodies,
             axial_features,
+            stud_features,
             hole_axis_groups,
             hole_patterns,
+            datum_dimensions,
+            planar_openings,
             thickness_analysis,
             radius_pair_analysis,
             surface_properties.Mass(),

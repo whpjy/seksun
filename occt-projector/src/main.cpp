@@ -60,6 +60,7 @@ struct CircleEvidence {
     Point2 center;
     double radius = 0.0;
     std::vector<int> angularBins;
+    bool visible = false;
 };
 
 struct CenterMark {
@@ -78,6 +79,10 @@ struct HoleCallout {
 struct HoleLocationTarget {
     std::vector<std::string> groupIds;
     Point2 center;
+    double horizontalDatumValue =
+        std::numeric_limits<double>::quiet_NaN();
+    double verticalDatumValue =
+        std::numeric_limits<double>::quiet_NaN();
 };
 
 struct EngineeringNote {
@@ -86,6 +91,23 @@ struct EngineeringNote {
     Point2 label;
     Point2 target;
     bool hasLeader = false;
+};
+
+struct RadiusLeaderCallout {
+    double innerRadius = 0.0;
+    double outerRadius = 0.0;
+    int totalPairs = 0;
+    int visibleMatches = 0;
+    Point2 target;
+    Point2 label;
+};
+
+struct ThicknessDimension {
+    Point2 first;
+    Point2 second;
+    Point2 dimensionFirst;
+    Point2 dimensionSecond;
+    double value = 0.0;
 };
 
 struct Bounds2 {
@@ -110,6 +132,11 @@ struct Bounds2 {
     double height() const { return maxY - minY; }
 };
 
+struct OpeningDimension {
+    std::string id;
+    Bounds2 bounds;
+};
+
 struct ViewDefinition {
     std::string id;
     std::string title;
@@ -126,6 +153,9 @@ struct ViewResult {
     std::vector<HoleCallout> holeCallouts;
     std::vector<HoleLocationTarget> holeLocationTargets;
     std::vector<EngineeringNote> engineeringNotes;
+    std::vector<RadiusLeaderCallout> radiusCallouts;
+    std::vector<ThicknessDimension> thicknessDimensions;
+    std::vector<OpeningDimension> openingDimensions;
     Bounds2 bounds;
 };
 
@@ -166,6 +196,62 @@ struct AnalysisRadiusPair {
     bool ambiguous = false;
 };
 
+struct AnalysisTorusPatch {
+    std::string faceId;
+    Point3 center;
+    Point3 axis;
+    Point3 surfacePoint;
+    double majorRadius = 0.0;
+    double minorRadius = 0.0;
+};
+
+struct AnalysisThicknessPair {
+    Point3 normal;
+    double firstOffset = 0.0;
+    double secondOffset = 0.0;
+    Point3 firstCentroid;
+    Point3 secondCentroid;
+    double distance = 0.0;
+    double firstArea = 0.0;
+    double secondArea = 0.0;
+};
+
+struct AnalysisPlanarOpening {
+    std::string id;
+    Point3 normal;
+    Point3 minimum;
+    Point3 maximum;
+    int sourceWires = 0;
+    int edges = 0;
+};
+
+struct AnalysisStudFeature {
+    struct Segment {
+        double diameter = 0.0;
+        double length = 0.0;
+        double startStation = 0.0;
+        double endStation = 0.0;
+    };
+    std::string id;
+    Point3 axis;
+    Point3 axisPoint;
+    double overallLength = 0.0;
+    double nominalShaftDiameter = 0.0;
+    double headDiameter = 0.0;
+    double tipDiameter = 0.0;
+    std::string assessment;
+    std::vector<Segment> segments;
+};
+
+struct AnalysisDatumDimension {
+    std::string id;
+    std::string featureId;
+    std::string axis;
+    std::string datum;
+    double coordinate = 0.0;
+    double value = 0.0;
+};
+
 struct AnalysisData {
     fs::path sourcePath;
     std::string schemaVersion;
@@ -176,6 +262,11 @@ struct AnalysisData {
     int thicknessEvidence = 0;
     std::string thicknessAssessment;
     std::vector<AnalysisRadiusPair> radiusPairs;
+    std::vector<AnalysisTorusPatch> torusPatches;
+    std::vector<AnalysisThicknessPair> thicknessPairs;
+    std::vector<AnalysisPlanarOpening> planarOpenings;
+    std::vector<AnalysisDatumDimension> datumDimensions;
+    std::vector<AnalysisStudFeature> studFeatures;
 };
 
 Point3 readPoint3(const nlohmann::json& value, const char* fieldName) {
@@ -236,6 +327,62 @@ AnalysisData readAnalysis(const fs::path& path, const fs::path& stepPath) {
         result.holePatterns.push_back(std::move(pattern));
     }
 
+    if (json.contains("datum_dimensions")) {
+        for (const nlohmann::json& item : json.at("datum_dimensions")) {
+            AnalysisDatumDimension dimension;
+            dimension.id = item.value("id", std::string());
+            dimension.featureId = item.value("feature_id", std::string());
+            dimension.axis = item.value("axis", std::string());
+            dimension.datum = item.value("datum", std::string());
+            dimension.coordinate = item.value("coordinate", 0.0);
+            dimension.value = item.value("value", 0.0);
+            result.datumDimensions.push_back(std::move(dimension));
+        }
+    }
+
+    if (json.contains("stud_features")) {
+        for (const nlohmann::json& item : json.at("stud_features")) {
+            AnalysisStudFeature stud;
+            stud.id = item.value("id", std::string());
+            stud.axis = readPoint3(item.at("axis"), "stud_features.axis");
+            stud.axisPoint = readPoint3(
+                item.at("axis_point"), "stud_features.axis_point");
+            stud.overallLength = item.value("overall_length", 0.0);
+            stud.nominalShaftDiameter = item.value(
+                "nominal_shaft_diameter", 0.0);
+            stud.headDiameter = item.value("head_diameter", 0.0);
+            stud.tipDiameter = item.value("tip_diameter", 0.0);
+            stud.assessment = item.value("assessment", std::string());
+            if (item.contains("segments")) {
+                for (const nlohmann::json& segmentItem : item.at("segments")) {
+                    AnalysisStudFeature::Segment segment;
+                    segment.diameter = segmentItem.value("diameter", 0.0);
+                    segment.length = segmentItem.value("length", 0.0);
+                    segment.startStation = segmentItem.value("start_station", 0.0);
+                    segment.endStation = segmentItem.value("end_station", 0.0);
+                    stud.segments.push_back(segment);
+                }
+            }
+            result.studFeatures.push_back(std::move(stud));
+        }
+    }
+
+    if (json.contains("planar_openings")) {
+        for (const nlohmann::json& item : json.at("planar_openings")) {
+            AnalysisPlanarOpening opening;
+            opening.id = item.value("id", std::string());
+            opening.normal = readPoint3(item.at("normal"),
+                                        "planar_openings.normal");
+            opening.minimum = readPoint3(item.at("min"),
+                                         "planar_openings.min");
+            opening.maximum = readPoint3(item.at("max"),
+                                         "planar_openings.max");
+            opening.sourceWires = item.value("source_wires", 0);
+            opening.edges = item.value("edges", 0);
+            result.planarOpenings.push_back(std::move(opening));
+        }
+    }
+
     if (json.contains("thickness_analysis")) {
         const nlohmann::json& thickness = json.at("thickness_analysis");
         result.dominantThickness =
@@ -244,6 +391,26 @@ AnalysisData readAnalysis(const fs::path& path, const fs::path& stepPath) {
             thickness.value("dominant_evidence", 0);
         result.thicknessAssessment =
             thickness.value("assessment", std::string());
+        if (thickness.contains("dominant_pairs")) {
+            for (const nlohmann::json& item :
+                 thickness.at("dominant_pairs")) {
+                AnalysisThicknessPair pair;
+                pair.normal = readPoint3(item.at("normal"),
+                                         "dominant_pairs.normal");
+                pair.firstOffset = item.value("first_offset", 0.0);
+                pair.secondOffset = item.value("second_offset", 0.0);
+                pair.firstCentroid = readPoint3(
+                    item.at("first_centroid"),
+                    "dominant_pairs.first_centroid");
+                pair.secondCentroid = readPoint3(
+                    item.at("second_centroid"),
+                    "dominant_pairs.second_centroid");
+                pair.distance = item.value("distance", 0.0);
+                pair.firstArea = item.value("first_area", 0.0);
+                pair.secondArea = item.value("second_area", 0.0);
+                result.thicknessPairs.push_back(std::move(pair));
+            }
+        }
     }
 
     if (json.contains("radius_pair_analysis")) {
@@ -262,6 +429,23 @@ AnalysisData readAnalysis(const fs::path& path, const fs::path& stepPath) {
                     pair.outerRadius > pair.innerRadius) {
                     result.radiusPairs.push_back(pair);
                 }
+            }
+        }
+        if (radiusAnalysis.contains("torus_patches")) {
+            for (const nlohmann::json& item :
+                 radiusAnalysis.at("torus_patches")) {
+                AnalysisTorusPatch patch;
+                patch.faceId = item.value("face_id", std::string());
+                patch.center = readPoint3(item.at("center"),
+                                          "torus_patches.center");
+                patch.axis = readPoint3(item.at("axis"),
+                                        "torus_patches.axis");
+                patch.surfacePoint = readPoint3(
+                    item.at("surface_point"),
+                    "torus_patches.surface_point");
+                patch.majorRadius = item.value("major_radius", 0.0);
+                patch.minorRadius = item.value("minor_radius", 0.0);
+                result.torusPatches.push_back(std::move(patch));
             }
         }
     }
@@ -312,7 +496,8 @@ int sampleCount(const BRepAdaptor_Curve& curve) {
 std::vector<Polyline> sampleShape(
     const TopoDS_Shape& shape,
     Bounds2& bounds,
-    std::vector<CircleEvidence>* circleEvidence = nullptr) {
+    std::vector<CircleEvidence>* circleEvidence = nullptr,
+    bool visibleEvidence = false) {
     std::vector<Polyline> result;
     if (shape.IsNull()) {
         return result;
@@ -335,6 +520,7 @@ std::vector<Polyline> sampleShape(
             CircleEvidence evidence;
             evidence.center = {center.X(), center.Y()};
             evidence.radius = circle.Radius();
+            evidence.visible = visibleEvidence;
 
             const double span = std::min(std::abs(last - first), fullCircle);
             const int evidenceSamples = std::max(
@@ -386,8 +572,10 @@ std::vector<Polyline> sampleShape(
 void appendSampled(std::vector<Polyline>& target,
                    const TopoDS_Shape& shape,
                    Bounds2& bounds,
-                   std::vector<CircleEvidence>* circleEvidence = nullptr) {
-    std::vector<Polyline> sampled = sampleShape(shape, bounds, circleEvidence);
+                   std::vector<CircleEvidence>* circleEvidence = nullptr,
+                   bool visibleEvidence = false) {
+    std::vector<Polyline> sampled = sampleShape(
+        shape, bounds, circleEvidence, visibleEvidence);
     target.insert(
         target.end(),
         std::make_move_iterator(sampled.begin()),
@@ -477,13 +665,15 @@ ViewResult project(const TopoDS_Shape& shape, const ViewDefinition& view) {
         result.visible,
         converted.VCompound(),
         result.bounds,
-        &result.circleEvidence);
+        &result.circleEvidence,
+        true);
     appendSampled(result.visible, converted.OutLineVCompound(), result.bounds);
     appendSampled(
         result.hidden,
         converted.HCompound(),
         result.bounds,
-        &result.circleEvidence);
+        &result.circleEvidence,
+        false);
     appendSampled(result.hidden, converted.OutLineHCompound(), result.bounds);
     buildCenterMarks(result);
     return result;
@@ -599,13 +789,35 @@ const AnalysisHoleGroup* selectDatumTarget(
     return result;
 }
 
+double datumValueFor(const AnalysisData& analysis,
+                     const std::string& featureId,
+                     const std::string& axis) {
+    const auto found = std::find_if(
+        analysis.datumDimensions.begin(),
+        analysis.datumDimensions.end(),
+        [&featureId, &axis](const AnalysisDatumDimension& dimension) {
+            return dimension.featureId == featureId &&
+                   dimension.axis == axis;
+        });
+    return found == analysis.datumDimensions.end()
+               ? std::numeric_limits<double>::quiet_NaN()
+               : found->value;
+}
+
 void addHoleLocationTarget(
     ViewResult& view,
     const AnalysisHoleGroup& target,
-    const std::vector<std::string>& groupIds) {
+    const std::vector<std::string>& groupIds,
+    const AnalysisData& analysis) {
     HoleLocationTarget location;
     location.groupIds = groupIds;
     location.center = projectPoint(target.center, view.definition);
+    if (view.definition.id == "front") {
+        location.horizontalDatumValue =
+            datumValueFor(analysis, target.id, "X");
+        location.verticalDatumValue =
+            datumValueFor(analysis, target.id, "Z");
+    }
     view.holeLocationTargets.push_back(std::move(location));
 }
 
@@ -687,7 +899,7 @@ void buildHoleCallouts(std::vector<ViewResult>& views,
         const AnalysisHoleGroup* datumTarget =
             selectDatumTarget(groups, view.definition);
         addHoleLocationTarget(
-            view, *datumTarget, pattern.groupIds);
+            view, *datumTarget, pattern.groupIds, analysis);
     }
 
     struct GroupBucket {
@@ -733,7 +945,7 @@ void buildHoleCallouts(std::vector<ViewResult>& views,
         // Diameter callouts may be aggregated, but each non-pattern hole still
         // needs its own X/Y position to be geometrically defined.
         for (const AnalysisHoleGroup* group : bucket.groups) {
-            addHoleLocationTarget(view, *group, {group->id});
+            addHoleLocationTarget(view, *group, {group->id}, analysis);
         }
     }
 
@@ -751,6 +963,389 @@ ViewResult* findView(std::vector<ViewResult>& views, const std::string& id) {
     return nullptr;
 }
 
+std::vector<CircleEvidence> mergedVisibleCircles(const ViewResult& view) {
+    std::vector<CircleEvidence> circles;
+    for (const CircleEvidence& evidence : view.circleEvidence) {
+        if (!evidence.visible || evidence.radius <= kEpsilon) {
+            continue;
+        }
+        CircleEvidence* match = nullptr;
+        for (CircleEvidence& circle : circles) {
+            const double centerTolerance = 0.01;
+            const double radiusTolerance =
+                std::max(0.005, circle.radius * 0.001);
+            if (std::hypot(circle.center.x - evidence.center.x,
+                           circle.center.y - evidence.center.y) <=
+                    centerTolerance &&
+                std::abs(circle.radius - evidence.radius) <=
+                    radiusTolerance) {
+                match = &circle;
+                break;
+            }
+        }
+        if (match == nullptr) {
+            circles.push_back(evidence);
+        } else {
+            match->angularBins.insert(
+                match->angularBins.end(),
+                evidence.angularBins.begin(), evidence.angularBins.end());
+        }
+    }
+    for (CircleEvidence& circle : circles) {
+        std::sort(circle.angularBins.begin(), circle.angularBins.end());
+        circle.angularBins.erase(
+            std::unique(circle.angularBins.begin(), circle.angularBins.end()),
+            circle.angularBins.end());
+    }
+    return circles;
+}
+
+Point2 rightmostEvidencePoint(const CircleEvidence& circle) {
+    constexpr double fullCircle = 6.283185307179586;
+    constexpr double angularBinCount = 720.0;
+    Point2 result{circle.center.x + circle.radius, circle.center.y};
+    double bestX = -std::numeric_limits<double>::infinity();
+    for (const int bin : circle.angularBins) {
+        const double angle =
+            (static_cast<double>(bin) + 0.5) / angularBinCount * fullCircle;
+        const Point2 point{
+            circle.center.x + circle.radius * std::cos(angle),
+            circle.center.y + circle.radius * std::sin(angle)};
+        if (point.x > bestX) {
+            bestX = point.x;
+            result = point;
+        }
+    }
+    return result;
+}
+
+double distance3(const Point3& left, const Point3& right) {
+    return std::sqrt(
+        (left.x - right.x) * (left.x - right.x) +
+        (left.y - right.y) * (left.y - right.y) +
+        (left.z - right.z) * (left.z - right.z));
+}
+
+double axisAlignment(const Point3& left, const Point3& right) {
+    return std::abs(left.x * right.x + left.y * right.y + left.z * right.z);
+}
+
+bool nearestVisiblePoint(const ViewResult& view,
+                         const Point2& reference,
+                         double maximumDistance,
+                         Point2& result) {
+    double bestDistance = std::numeric_limits<double>::infinity();
+    for (const Polyline& line : view.visible) {
+        for (const Point2& point : line.points) {
+            const double distance =
+                std::hypot(point.x - reference.x, point.y - reference.y);
+            if (distance < bestDistance) {
+                bestDistance = distance;
+                result = point;
+            }
+        }
+    }
+    return bestDistance <= maximumDistance;
+}
+
+void buildSpatialRadiusCallouts(ViewResult& view,
+                                const AnalysisData& analysis) {
+    constexpr int angularBinCount = 720;
+    const std::vector<CircleEvidence> circles = mergedVisibleCircles(view);
+    const double span = std::max(view.bounds.width(), view.bounds.height());
+    std::vector<Point2> usedTargets;
+
+    for (const AnalysisRadiusPair& pair : analysis.radiusPairs) {
+        int matches = 0;
+        Point2 bestTarget;
+        bool hasTarget = false;
+        std::vector<Point2> candidates;
+
+        // Preferred path: pair exact 3D torus faces from analyzer schema 0.9+,
+        // then snap their projected surface point to the nearest visible edge.
+        for (const AnalysisTorusPatch& inner : analysis.torusPatches) {
+            if (std::abs(inner.minorRadius - pair.innerRadius) > 0.02) {
+                continue;
+            }
+            for (const AnalysisTorusPatch& outer : analysis.torusPatches) {
+                if (std::abs(outer.minorRadius - pair.outerRadius) > 0.02 ||
+                    distance3(inner.center, outer.center) > 0.05 ||
+                    axisAlignment(inner.axis, outer.axis) < 0.999 ||
+                    std::abs(inner.majorRadius - outer.majorRadius) > 0.05) {
+                    continue;
+                }
+                const Point2 projected =
+                    projectPoint(outer.surfacePoint, view.definition);
+                Point2 target;
+                const double snapDistance =
+                    std::max(3.0, pair.outerRadius * 1.75);
+                if (!nearestVisiblePoint(
+                        view, projected, snapDistance, target)) {
+                    continue;
+                }
+                ++matches;
+                const bool duplicateCandidate = std::any_of(
+                    candidates.begin(), candidates.end(),
+                    [&target](const Point2& existing) {
+                        return std::hypot(existing.x - target.x,
+                                          existing.y - target.y) <= 0.5;
+                    });
+                if (!duplicateCandidate) {
+                    candidates.push_back(target);
+                }
+                break;
+            }
+        }
+
+        std::sort(
+            candidates.begin(), candidates.end(),
+            [](const Point2& left, const Point2& right) {
+                if (std::abs(left.x - right.x) > 1.0e-7) {
+                    return left.x > right.x;
+                }
+                return left.y < right.y;
+            });
+        const double targetSeparation = std::max(4.0, span * 0.04);
+        for (const Point2& candidate : candidates) {
+            const bool alreadyUsed = std::any_of(
+                usedTargets.begin(), usedTargets.end(),
+                [&candidate, targetSeparation](const Point2& used) {
+                    return std::hypot(candidate.x - used.x,
+                                      candidate.y - used.y) <
+                           targetSeparation;
+                });
+            if (!alreadyUsed) {
+                bestTarget = candidate;
+                hasTarget = true;
+                break;
+            }
+        }
+
+        // Backward-compatible fallback for older analyzer JSON: use exact
+        // circular HLR evidence when it happens to survive projection.
+        if (!hasTarget && candidates.empty()) {
+            for (const CircleEvidence& inner : circles) {
+                if (std::abs(inner.radius - pair.innerRadius) > 0.02) {
+                    continue;
+                }
+                const double innerCoverage =
+                    static_cast<double>(inner.angularBins.size()) /
+                    static_cast<double>(angularBinCount);
+                if (innerCoverage < 0.04 || innerCoverage > 0.92) {
+                    continue;
+                }
+                for (const CircleEvidence& outer : circles) {
+                    if (std::abs(outer.radius - pair.outerRadius) > 0.02 ||
+                        std::hypot(inner.center.x - outer.center.x,
+                                   inner.center.y - outer.center.y) > 0.03) {
+                        continue;
+                    }
+                    const double outerCoverage =
+                        static_cast<double>(outer.angularBins.size()) /
+                        static_cast<double>(angularBinCount);
+                    if (outerCoverage < 0.04 || outerCoverage > 0.92) {
+                        continue;
+                    }
+                    ++matches;
+                    const Point2 target = rightmostEvidencePoint(outer);
+                    const double targetSeparation =
+                        std::max(4.0, span * 0.04);
+                    const bool alreadyUsed = std::any_of(
+                        usedTargets.begin(), usedTargets.end(),
+                        [&target, targetSeparation](const Point2& used) {
+                            return std::hypot(target.x - used.x,
+                                              target.y - used.y) <
+                                   targetSeparation;
+                        });
+                    if (alreadyUsed) {
+                        break;
+                    }
+                    if (!hasTarget || target.x > bestTarget.x) {
+                        hasTarget = true;
+                        bestTarget = target;
+                    }
+                    break;
+                }
+            }
+        }
+        if (!hasTarget) {
+            continue;
+        }
+
+        RadiusLeaderCallout callout;
+        callout.innerRadius = pair.innerRadius;
+        callout.outerRadius = pair.outerRadius;
+        callout.totalPairs = pair.estimatedPairs;
+        callout.visibleMatches = matches;
+        callout.target = bestTarget;
+        view.radiusCallouts.push_back(callout);
+        usedTargets.push_back(bestTarget);
+    }
+
+
+    std::sort(
+        view.radiusCallouts.begin(), view.radiusCallouts.end(),
+        [](const RadiusLeaderCallout& left,
+           const RadiusLeaderCallout& right) {
+            if (std::abs(left.target.y - right.target.y) > 1.0e-7) {
+                return left.target.y > right.target.y;
+            }
+            return left.target.x > right.target.x;
+        });
+
+    const double labelX = view.bounds.maxX + std::max(10.0, span * 0.08);
+    const double firstY = view.bounds.minY + span * 0.20;
+    const double separation = std::max(9.0, span * 0.09);
+    for (std::size_t index = 0; index < view.radiusCallouts.size(); ++index) {
+        view.radiusCallouts[index].label = {
+            labelX,
+            firstY - static_cast<double>(index) * separation};
+    }
+}
+
+bool buildThicknessDimension(ViewResult& view,
+                             const AnalysisData& analysis) {
+    const AnalysisThicknessPair* bestPair = nullptr;
+    Point2 bestFirst;
+    Point2 bestSecond;
+    double bestArea = -1.0;
+
+    for (const AnalysisThicknessPair& pair : analysis.thicknessPairs) {
+        if (std::abs(pair.distance - analysis.dominantThickness) > 0.002) {
+            continue;
+        }
+        const Point3 midpoint{
+            (pair.firstCentroid.x + pair.secondCentroid.x) / 2.0,
+            (pair.firstCentroid.y + pair.secondCentroid.y) / 2.0,
+            (pair.firstCentroid.z + pair.secondCentroid.z) / 2.0};
+        const double midpointOffset =
+            midpoint.x * pair.normal.x +
+            midpoint.y * pair.normal.y +
+            midpoint.z * pair.normal.z;
+        const auto pointOnPlane = [&midpoint, midpointOffset, &pair](
+                                      double planeOffset) {
+            const double shift = planeOffset - midpointOffset;
+            return Point3{
+                midpoint.x + pair.normal.x * shift,
+                midpoint.y + pair.normal.y * shift,
+                midpoint.z + pair.normal.z * shift};
+        };
+        const Point2 first = projectPoint(
+            pointOnPlane(pair.firstOffset), view.definition);
+        const Point2 second = projectPoint(
+            pointOnPlane(pair.secondOffset), view.definition);
+        const double projectedDistance =
+            std::hypot(second.x - first.x, second.y - first.y);
+        if (std::abs(projectedDistance - pair.distance) > 0.03) {
+            continue;
+        }
+        const double margin = std::max(5.0, analysis.dominantThickness * 2.0);
+        const auto nearView = [&view, margin](const Point2& point) {
+            return point.x >= view.bounds.minX - margin &&
+                   point.x <= view.bounds.maxX + margin &&
+                   point.y >= view.bounds.minY - margin &&
+                   point.y <= view.bounds.maxY + margin;
+        };
+        if (!nearView(first) || !nearView(second)) {
+            continue;
+        }
+        const double area = std::min(pair.firstArea, pair.secondArea);
+        if (bestPair == nullptr || area > bestArea) {
+            bestPair = &pair;
+            bestFirst = first;
+            bestSecond = second;
+            bestArea = area;
+        }
+    }
+
+    if (bestPair == nullptr) {
+        return false;
+    }
+
+    const double measured =
+        std::hypot(bestSecond.x - bestFirst.x, bestSecond.y - bestFirst.y);
+    const Point2 direction{
+        (bestSecond.x - bestFirst.x) / measured,
+        (bestSecond.y - bestFirst.y) / measured};
+    Point2 perpendicular{-direction.y, direction.x};
+    const Point2 viewCenter{
+        (view.bounds.minX + view.bounds.maxX) / 2.0,
+        (view.bounds.minY + view.bounds.maxY) / 2.0};
+    const Point2 pairCenter{
+        (bestFirst.x + bestSecond.x) / 2.0,
+        (bestFirst.y + bestSecond.y) / 2.0};
+    const double outwardDot =
+        perpendicular.x * (pairCenter.x - viewCenter.x) +
+        perpendicular.y * (pairCenter.y - viewCenter.y);
+    if (outwardDot < 0.0) {
+        perpendicular.x = -perpendicular.x;
+        perpendicular.y = -perpendicular.y;
+    }
+    const double span = std::max(view.bounds.width(), view.bounds.height());
+    const double offset = std::max(6.0, span * 0.055);
+    ThicknessDimension dimension;
+    dimension.first = bestFirst;
+    dimension.second = bestSecond;
+    dimension.dimensionFirst = {
+        bestFirst.x + perpendicular.x * offset,
+        bestFirst.y + perpendicular.y * offset};
+    dimension.dimensionSecond = {
+        bestSecond.x + perpendicular.x * offset,
+        bestSecond.y + perpendicular.y * offset};
+    dimension.value = analysis.dominantThickness;
+    view.thicknessDimensions.push_back(dimension);
+    return true;
+}
+
+bool buildOpeningDimension(ViewResult& view,
+                           const AnalysisData& analysis) {
+    const AnalysisPlanarOpening* bestOpening = nullptr;
+    Bounds2 bestBounds;
+    double bestArea = 0.0;
+    for (const AnalysisPlanarOpening& opening : analysis.planarOpenings) {
+        if (std::abs(dot(opening.normal, view.definition.direction)) < 0.98) {
+            continue;
+        }
+        Bounds2 projectedBounds;
+        for (const double x : {opening.minimum.x, opening.maximum.x}) {
+            for (const double y : {opening.minimum.y, opening.maximum.y}) {
+                for (const double z : {opening.minimum.z, opening.maximum.z}) {
+                    projectedBounds.add(projectPoint({x, y, z}, view.definition));
+                }
+            }
+        }
+        if (!projectedBounds.valid() || projectedBounds.width() < 5.0 ||
+            projectedBounds.height() < 5.0) {
+            continue;
+        }
+        const double area = projectedBounds.width() * projectedBounds.height();
+        const double viewArea = view.bounds.width() * view.bounds.height();
+        if (area >= viewArea * 0.80) {
+            continue;
+        }
+        // Large 20-edge loops in this model are press-rib / inner contour
+        // boundaries, not the central functional opening. Keep compact,
+        // non-circular openings such as the 10-edge central cutout.
+        if (opening.edges >= 18 && area > viewArea * 0.10) {
+            continue;
+        }
+        if (projectedBounds.width() > view.bounds.width() * 0.65 &&
+            projectedBounds.height() > view.bounds.height() * 0.65) {
+            continue;
+        }
+        if (bestOpening == nullptr || area > bestArea) {
+            bestOpening = &opening;
+            bestBounds = projectedBounds;
+            bestArea = area;
+        }
+    }
+    if (bestOpening == nullptr) {
+        return false;
+    }
+    view.openingDimensions.push_back({bestOpening->id, bestBounds});
+    return true;
+}
+
 void buildEngineeringNotes(std::vector<ViewResult>& views,
                            const AnalysisData& analysis) {
     if (analysis.dominantThickness > kEpsilon &&
@@ -758,29 +1353,48 @@ void buildEngineeringNotes(std::vector<ViewResult>& views,
         analysis.thicknessAssessment.rfind("EXCLUDED", 0) != 0) {
         ViewResult* right = findView(views, "right");
         if (right != nullptr) {
-            const double span =
-                std::max(right->bounds.width(), right->bounds.height());
-            EngineeringNote note;
-            note.type = "sheet-thickness";
-            note.lines.push_back(
-                "SHEET THICKNESS " +
-                dimensionNumber(analysis.dominantThickness) + " (REF)");
-            note.label = {
-                (right->bounds.minX + right->bounds.maxX) / 2.0,
-                right->bounds.maxY + std::max(8.0, span * 0.10)};
-            right->engineeringNotes.push_back(std::move(note));
+            const bool spatiallyLocated =
+                buildThicknessDimension(*right, analysis);
+            if (!spatiallyLocated) {
+                const double span =
+                    std::max(right->bounds.width(), right->bounds.height());
+                EngineeringNote note;
+                note.type = "sheet-thickness";
+                note.lines.push_back(
+                    "SHEET THICKNESS " +
+                    dimensionNumber(analysis.dominantThickness) + " (REF)");
+                note.label = {
+                    (right->bounds.minX + right->bounds.maxX) / 2.0,
+                    right->bounds.maxY + std::max(8.0, span * 0.10)};
+                right->engineeringNotes.push_back(std::move(note));
+            }
         }
     }
 
     if (!analysis.radiusPairs.empty()) {
         ViewResult* front = findView(views, "front");
         if (front != nullptr) {
+            buildSpatialRadiusCallouts(*front, analysis);
             const double span =
                 std::max(front->bounds.width(), front->bounds.height());
             EngineeringNote note;
             note.type = "bend-radii";
             note.lines.push_back("BEND RADII (REF)");
             for (const AnalysisRadiusPair& pair : analysis.radiusPairs) {
+                const bool spatiallyLocated = std::any_of(
+                    front->radiusCallouts.begin(),
+                    front->radiusCallouts.end(),
+                    [&pair](const RadiusLeaderCallout& callout) {
+                        return std::abs(
+                                   callout.innerRadius - pair.innerRadius) <=
+                                   0.02 &&
+                               std::abs(
+                                   callout.outerRadius - pair.outerRadius) <=
+                                   0.02;
+                    });
+                if (spatiallyLocated) {
+                    continue;
+                }
                 std::string prefix;
                 if (pair.estimatedPairs > 1) {
                     prefix = std::to_string(pair.estimatedPairs) + "X ";
@@ -791,14 +1405,75 @@ void buildEngineeringNotes(std::vector<ViewResult>& views,
             }
             note.label = {
                 front->bounds.maxX + std::max(10.0, span * 0.08),
-                front->bounds.minY + span * 0.18};
+                front->radiusCallouts.empty()
+                    ? front->bounds.minY + span * 0.18
+                    : front->bounds.minY + span * 0.36};
             front->engineeringNotes.push_back(std::move(note));
         }
+    }
+
+    if (!analysis.studFeatures.empty()) {
+        ViewResult* right = findView(views, "right");
+        std::vector<const AnalysisStudFeature*> approvedStuds;
+        for (const AnalysisStudFeature& item : analysis.studFeatures) {
+            if (item.assessment == "HIGH_CONFIDENCE_STEPPED_STUD") {
+                approvedStuds.push_back(&item);
+            }
+        }
+        if (right != nullptr && !approvedStuds.empty()) {
+            const AnalysisStudFeature& stud = *approvedStuds.front();
+            const double span =
+                std::max(right->bounds.width(), right->bounds.height());
+            const double targetOffset = stud.overallLength * 0.55;
+            const Point3 target3{
+                stud.axisPoint.x - stud.axis.x * targetOffset,
+                stud.axisPoint.y - stud.axis.y * targetOffset,
+                stud.axisPoint.z - stud.axis.z * targetOffset};
+            EngineeringNote note;
+            note.type = "stud-specification";
+            note.hasLeader = true;
+            note.target = projectPoint(target3, right->definition);
+            note.label = {
+                right->bounds.maxX + std::max(10.0, span * 0.10),
+                note.target.y + std::max(8.0, span * 0.08)};
+            const auto segmentLength = [&stud](double diameter) {
+                double result = 0.0;
+                for (const AnalysisStudFeature::Segment& segment : stud.segments) {
+                    if (std::abs(segment.diameter - diameter) <= 0.02) {
+                        result = std::max(result, segment.length);
+                    }
+                }
+                return result;
+            };
+            note.lines.push_back(
+                std::to_string(approvedStuds.size()) +
+                "X STUD");
+            note.lines.push_back(
+                "SHAFT &#216;" +
+                dimensionNumber(stud.nominalShaftDiameter) + " X " +
+                dimensionNumber(segmentLength(stud.nominalShaftDiameter)));
+            note.lines.push_back(
+                "HEAD &#216;" + dimensionNumber(stud.headDiameter) +
+                " X " + dimensionNumber(segmentLength(stud.headDiameter)));
+            note.lines.push_back(
+                "TIP &#216;" + dimensionNumber(stud.tipDiameter) +
+                " X " + dimensionNumber(segmentLength(stud.tipDiameter)));
+            note.lines.push_back(
+                "OVERALL " + dimensionNumber(stud.overallLength) +
+                " REF");
+            right->engineeringNotes.push_back(std::move(note));
+        }
+    }
+
+    ViewResult* front = findView(views, "front");
+    if (front != nullptr) {
+        buildOpeningDimension(*front, analysis);
     }
 }
 
 struct AxisLocation {
     double coordinate = 0.0;
+    double datumValue = std::numeric_limits<double>::quiet_NaN();
     Point2 target;
     std::vector<std::string> groupIds;
 };
@@ -816,7 +1491,11 @@ std::vector<AxisLocation> uniqueAxisLocations(
                 return std::abs(item.coordinate - coordinate) <= mergeTolerance;
             });
         if (existing == result.end()) {
-            result.push_back({coordinate, target.center, target.groupIds});
+            const double datumValue = horizontal
+                ? target.horizontalDatumValue
+                : target.verticalDatumValue;
+            result.push_back(
+                {coordinate, datumValue, target.center, target.groupIds});
         } else {
             existing->groupIds.insert(
                 existing->groupIds.end(),
@@ -977,6 +1656,222 @@ void writeEngineeringNotes(std::ofstream& output,
     }
 }
 
+void writeRadiusCallouts(std::ofstream& output,
+                         const ViewResult& view) {
+    const double span = std::max(view.bounds.width(), view.bounds.height());
+    const double elbowX = view.bounds.maxX + std::max(5.0, span * 0.04);
+    const double fontSize = std::max(3.0, span * 0.024);
+    for (const RadiusLeaderCallout& callout : view.radiusCallouts) {
+        output << "  <g class=\"radius-callout\" data-visible-matches=\""
+               << callout.visibleMatches << "\">\n";
+        output << "    <polyline class=\"leader\" points=\""
+               << number(callout.target.x) << ',' << number(-callout.target.y)
+               << ' ' << number(elbowX) << ',' << number(-callout.label.y)
+               << ' ' << number(callout.label.x - 1.2) << ','
+               << number(-callout.label.y) << "\"/>\n";
+        output << "    <circle class=\"leader-dot\" cx=\""
+               << number(callout.target.x) << "\" cy=\""
+               << number(-callout.target.y) << "\" r=\"0.55\"/>\n";
+        const std::string prefix = callout.totalPairs > 1
+            ? std::to_string(callout.totalPairs) + "X "
+            : "";
+        output << "    <text x=\"" << number(callout.label.x)
+               << "\" y=\"" << number(-callout.label.y)
+               << "\" font-size=\"" << number(fontSize) << "\">"
+               << prefix << 'R' << dimensionNumber(callout.innerRadius)
+               << " / R" << dimensionNumber(callout.outerRadius)
+               << "</text>\n";
+        output << "  </g>\n";
+    }
+}
+
+void writeThicknessDimensions(std::ofstream& output,
+                              const ViewResult& view) {
+    const double span = std::max(view.bounds.width(), view.bounds.height());
+    const double arrowLength = std::max(2.2, span * 0.018);
+    const double arrowHalfWidth = std::max(0.7, span * 0.0055);
+    const double overrun = std::max(1.2, span * 0.01);
+    const double fontSize = std::max(3.0, span * 0.026);
+    constexpr double radiansToDegrees = 57.29577951308232;
+
+    for (const ThicknessDimension& dimension : view.thicknessDimensions) {
+        const double length = std::hypot(
+            dimension.dimensionSecond.x - dimension.dimensionFirst.x,
+            dimension.dimensionSecond.y - dimension.dimensionFirst.y);
+        if (length <= kEpsilon) {
+            continue;
+        }
+        const Point2 direction{
+            (dimension.dimensionSecond.x - dimension.dimensionFirst.x) / length,
+            (dimension.dimensionSecond.y - dimension.dimensionFirst.y) / length};
+        const Point2 perpendicular{-direction.y, direction.x};
+        const auto shifted = [](const Point2& point,
+                                const Point2& firstDirection,
+                                double firstScale,
+                                const Point2& secondDirection,
+                                double secondScale) {
+            return Point2{
+                point.x + firstDirection.x * firstScale +
+                    secondDirection.x * secondScale,
+                point.y + firstDirection.y * firstScale +
+                    secondDirection.y * secondScale};
+        };
+        const Point2 firstExtensionEnd = shifted(
+            dimension.dimensionFirst, perpendicular, overrun,
+            direction, 0.0);
+        const Point2 secondExtensionEnd = shifted(
+            dimension.dimensionSecond, perpendicular, overrun,
+            direction, 0.0);
+        const Point2 lineStart = shifted(
+            dimension.dimensionFirst, direction, -(arrowLength + overrun),
+            perpendicular, 0.0);
+        const Point2 lineEnd = shifted(
+            dimension.dimensionSecond, direction, arrowLength + overrun,
+            perpendicular, 0.0);
+        const Point2 firstBaseA = shifted(
+            dimension.dimensionFirst, direction, -arrowLength,
+            perpendicular, arrowHalfWidth);
+        const Point2 firstBaseB = shifted(
+            dimension.dimensionFirst, direction, -arrowLength,
+            perpendicular, -arrowHalfWidth);
+        const Point2 secondBaseA = shifted(
+            dimension.dimensionSecond, direction, arrowLength,
+            perpendicular, arrowHalfWidth);
+        const Point2 secondBaseB = shifted(
+            dimension.dimensionSecond, direction, arrowLength,
+            perpendicular, -arrowHalfWidth);
+        const Point2 label = shifted(
+            {(dimension.dimensionFirst.x + dimension.dimensionSecond.x) / 2.0,
+             (dimension.dimensionFirst.y + dimension.dimensionSecond.y) / 2.0},
+            perpendicular, fontSize * 0.85,
+            direction, 0.0);
+        double angle = std::atan2(
+            -(dimension.dimensionSecond.y - dimension.dimensionFirst.y),
+            dimension.dimensionSecond.x - dimension.dimensionFirst.x) *
+            radiansToDegrees;
+        if (angle > 90.0) angle -= 180.0;
+        if (angle < -90.0) angle += 180.0;
+
+        output << "  <g class=\"dimensions sheet-thickness-dimension\">\n";
+        output << "    <line class=\"extension\" x1=\""
+               << number(dimension.first.x) << "\" y1=\""
+               << number(-dimension.first.y) << "\" x2=\""
+               << number(firstExtensionEnd.x) << "\" y2=\""
+               << number(-firstExtensionEnd.y) << "\"/>\n";
+        output << "    <line class=\"extension\" x1=\""
+               << number(dimension.second.x) << "\" y1=\""
+               << number(-dimension.second.y) << "\" x2=\""
+               << number(secondExtensionEnd.x) << "\" y2=\""
+               << number(-secondExtensionEnd.y) << "\"/>\n";
+        output << "    <line class=\"dimension-line\" x1=\""
+               << number(lineStart.x) << "\" y1=\"" << number(-lineStart.y)
+               << "\" x2=\"" << number(lineEnd.x) << "\" y2=\""
+               << number(-lineEnd.y) << "\"/>\n";
+        output << "    <path class=\"dimension-arrow\" d=\"M "
+               << number(dimension.dimensionFirst.x) << ' '
+               << number(-dimension.dimensionFirst.y) << " L "
+               << number(firstBaseA.x) << ' ' << number(-firstBaseA.y)
+               << " L " << number(firstBaseB.x) << ' '
+               << number(-firstBaseB.y) << " Z\"/>\n";
+        output << "    <path class=\"dimension-arrow\" d=\"M "
+               << number(dimension.dimensionSecond.x) << ' '
+               << number(-dimension.dimensionSecond.y) << " L "
+               << number(secondBaseA.x) << ' ' << number(-secondBaseA.y)
+               << " L " << number(secondBaseB.x) << ' '
+               << number(-secondBaseB.y) << " Z\"/>\n";
+        output << "    <text x=\"" << number(label.x) << "\" y=\""
+               << number(-label.y) << "\" font-size=\"" << number(fontSize)
+               << "\" transform=\"rotate(" << number(angle) << ' '
+               << number(label.x) << ' ' << number(-label.y) << ")\">"
+               << dimensionNumber(dimension.value) << " REF</text>\n";
+        output << "  </g>\n";
+    }
+}
+
+void writeOpeningDimensions(std::ofstream& output,
+                            const ViewResult& view) {
+    const double span = std::max(view.bounds.width(), view.bounds.height());
+    const double horizontalGap = std::max(14.0, span * 0.115);
+    const double verticalGap = std::max(5.0, span * 0.045);
+    const double overrun = std::max(1.2, span * 0.01);
+    const double arrowLength = std::max(2.0, span * 0.016);
+    const double arrowHalfWidth = std::max(0.65, span * 0.005);
+    const double fontSize = std::max(3.0, span * 0.024);
+
+    for (const OpeningDimension& dimension : view.openingDimensions) {
+        const Bounds2& bounds = dimension.bounds;
+        const double horizontalY = bounds.maxY + horizontalGap;
+        const double verticalX = bounds.minX - verticalGap;
+        output << "  <g class=\"dimensions opening-dimensions\" "
+               << "data-opening-id=\"" << dimension.id << "\">\n";
+
+        output << "    <line class=\"extension\" x1=\"" << number(bounds.minX)
+               << "\" y1=\"" << number(-(bounds.maxY + 0.6))
+               << "\" x2=\"" << number(bounds.minX) << "\" y2=\""
+               << number(-(horizontalY + overrun)) << "\"/>\n";
+        output << "    <line class=\"extension\" x1=\"" << number(bounds.maxX)
+               << "\" y1=\"" << number(-(bounds.maxY + 0.6))
+               << "\" x2=\"" << number(bounds.maxX) << "\" y2=\""
+               << number(-(horizontalY + overrun)) << "\"/>\n";
+        output << "    <line class=\"dimension-line\" x1=\""
+               << number(bounds.minX) << "\" y1=\"" << number(-horizontalY)
+               << "\" x2=\"" << number(bounds.maxX) << "\" y2=\""
+               << number(-horizontalY) << "\"/>\n";
+        output << "    <path class=\"dimension-arrow\" d=\"M "
+               << number(bounds.minX) << ' ' << number(-horizontalY) << " L "
+               << number(bounds.minX + arrowLength) << ' '
+               << number(-(horizontalY + arrowHalfWidth)) << " L "
+               << number(bounds.minX + arrowLength) << ' '
+               << number(-(horizontalY - arrowHalfWidth)) << " Z\"/>\n";
+        output << "    <path class=\"dimension-arrow\" d=\"M "
+               << number(bounds.maxX) << ' ' << number(-horizontalY) << " L "
+               << number(bounds.maxX - arrowLength) << ' '
+               << number(-(horizontalY + arrowHalfWidth)) << " L "
+               << number(bounds.maxX - arrowLength) << ' '
+               << number(-(horizontalY - arrowHalfWidth)) << " Z\"/>\n";
+        output << "    <text x=\"" << number((bounds.minX + bounds.maxX) / 2.0)
+               << "\" y=\"" << number(-(horizontalY + fontSize * 0.55))
+               << "\" font-size=\"" << number(fontSize) << "\">"
+               << dimensionNumber(bounds.width()) << " REF</text>\n";
+
+        output << "    <line class=\"extension\" x1=\""
+               << number(bounds.minX - 0.6) << "\" y1=\""
+               << number(-bounds.minY) << "\" x2=\""
+               << number(verticalX - overrun) << "\" y2=\""
+               << number(-bounds.minY) << "\"/>\n";
+        output << "    <line class=\"extension\" x1=\""
+               << number(bounds.minX - 0.6) << "\" y1=\""
+               << number(-bounds.maxY) << "\" x2=\""
+               << number(verticalX - overrun) << "\" y2=\""
+               << number(-bounds.maxY) << "\"/>\n";
+        output << "    <line class=\"dimension-line\" x1=\""
+               << number(verticalX) << "\" y1=\"" << number(-bounds.minY)
+               << "\" x2=\"" << number(verticalX) << "\" y2=\""
+               << number(-bounds.maxY) << "\"/>\n";
+        output << "    <path class=\"dimension-arrow\" d=\"M "
+               << number(verticalX) << ' ' << number(-bounds.minY) << " L "
+               << number(verticalX - arrowHalfWidth) << ' '
+               << number(-(bounds.minY + arrowLength)) << " L "
+               << number(verticalX + arrowHalfWidth) << ' '
+               << number(-(bounds.minY + arrowLength)) << " Z\"/>\n";
+        output << "    <path class=\"dimension-arrow\" d=\"M "
+               << number(verticalX) << ' ' << number(-bounds.maxY) << " L "
+               << number(verticalX - arrowHalfWidth) << ' '
+               << number(-(bounds.maxY - arrowLength)) << " L "
+               << number(verticalX + arrowHalfWidth) << ' '
+               << number(-(bounds.maxY - arrowLength)) << " Z\"/>\n";
+        const double verticalTextX = verticalX - fontSize * 0.55;
+        const double verticalTextY = -(bounds.minY + bounds.maxY) / 2.0;
+        output << "    <text x=\"" << number(verticalTextX) << "\" y=\""
+               << number(verticalTextY) << "\" font-size=\""
+               << number(fontSize) << "\" transform=\"rotate(-90 "
+               << number(verticalTextX) << ' ' << number(verticalTextY)
+               << ")\">" << dimensionNumber(bounds.height())
+               << " REF</text>\n";
+        output << "  </g>\n";
+    }
+}
+
 void writeGroupIds(std::ofstream& output,
                    const std::vector<std::string>& groupIds) {
     for (std::size_t index = 0; index < groupIds.size(); ++index) {
@@ -1006,7 +1901,9 @@ void writeHorizontalHoleLocations(std::ofstream& output,
 
     for (std::size_t index = 0; index < locations.size(); ++index) {
         const AxisLocation& location = locations[index];
-        const double measured = location.coordinate - view.bounds.minX;
+        const double measured = std::isfinite(location.datumValue)
+            ? location.datumValue
+            : location.coordinate - view.bounds.minX;
         if (measured <= 0.005) {
             continue;
         }
@@ -1070,7 +1967,9 @@ void writeVerticalHoleLocations(std::ofstream& output,
 
     for (std::size_t index = 0; index < locations.size(); ++index) {
         const AxisLocation& location = locations[index];
-        const double measured = location.coordinate - view.bounds.minY;
+        const double measured = std::isfinite(location.datumValue)
+            ? location.datumValue
+            : location.coordinate - view.bounds.minY;
         if (measured <= 0.005) {
             continue;
         }
@@ -1279,6 +2178,13 @@ void writeDrawingStyle(std::ofstream& output) {
            << "stroke-linejoin: round; }\n"
            << "    .engineering-note .leader { fill: none; stroke: #0f172a; "
            << "stroke-width: 0.75; vector-effect: non-scaling-stroke; }\n"
+           << "    .radius-callout .leader { fill: none; stroke: #0f172a; "
+           << "stroke-width: 0.75; vector-effect: non-scaling-stroke; }\n"
+           << "    .radius-callout .leader-dot { fill: #0f172a; }\n"
+           << "    .radius-callout text { fill: #0f172a; font-family: Arial, "
+           << "'Microsoft YaHei', sans-serif; text-anchor: start; "
+           << "dominant-baseline: central; paint-order: stroke; stroke: white; "
+           << "stroke-width: 3px; stroke-linejoin: round; }\n"
            << "  </style>\n";
 }
 
@@ -1334,7 +2240,10 @@ void writeSvg(const fs::path& path, const ViewResult& view) {
     writeHoleCallouts(output, view);
     writeHoleLocationDimensions(output, view);
     writeOverallDimensions(output, view);
+    writeThicknessDimensions(output, view);
+    writeOpeningDimensions(output, view);
     writeEngineeringNotes(output, view);
+    writeRadiusCallouts(output, view);
     output << "</svg>\n";
 }
 
@@ -1356,7 +2265,10 @@ void writePlacedView(std::ofstream& output, const ViewPlacement& placement) {
     writeHoleCallouts(output, *placement.view);
     writeHoleLocationDimensions(output, *placement.view);
     writeOverallDimensions(output, *placement.view);
+    writeThicknessDimensions(output, *placement.view);
+    writeOpeningDimensions(output, *placement.view);
     writeEngineeringNotes(output, *placement.view);
+    writeRadiusCallouts(output, *placement.view);
     output << "  </g>\n";
 }
 
@@ -1441,7 +2353,7 @@ void writeManifest(const fs::path& path,
     }
 
     output << "{\n"
-           << "  \"schema_version\": \"0.7.0\",\n"
+           << "  \"schema_version\": \"0.16.0\",\n"
            << "  \"source_file\": \"" << source.filename().string() << "\",\n"
            << "  \"units\": \"mm\",\n"
            << "  \"projection_method\": \"FIRST_ANGLE\",\n"
@@ -1457,6 +2369,15 @@ void writeManifest(const fs::path& path,
                << ", \"thickness_assessment\": \""
                << analysis->thicknessAssessment
                << "\", \"radius_pairs\": " << analysis->radiusPairs.size()
+               << ", \"torus_patches\": " << analysis->torusPatches.size()
+               << ", \"thickness_pairs\": "
+               << analysis->thicknessPairs.size()
+               << ", \"planar_openings\": "
+               << analysis->planarOpenings.size()
+               << ", \"datum_dimensions\": "
+               << analysis->datumDimensions.size()
+               << ", \"stud_features\": "
+               << analysis->studFeatures.size()
                << "},\n";
     } else {
         output << "  \"analysis\": null,\n";
@@ -1479,6 +2400,11 @@ void writeManifest(const fs::path& path,
                << ", \"hole_callouts\": " << view.holeCallouts.size()
                << ", \"engineering_notes\": "
                << view.engineeringNotes.size()
+               << ", \"radius_callouts\": " << view.radiusCallouts.size()
+               << ", \"thickness_dimensions\": "
+               << view.thicknessDimensions.size()
+               << ", \"opening_dimensions\": "
+               << view.openingDimensions.size()
                << ", \"width\": " << number(view.bounds.width())
                << ", \"height\": " << number(view.bounds.height()) << "}";
         if (i + 1 != views.size()) {
@@ -1513,6 +2439,11 @@ int main(int argc, char** argv) {
                       << " thickness="
                       << dimensionNumber(analysis.dominantThickness)
                       << " radius-pairs=" << analysis.radiusPairs.size()
+                      << " torus-patches=" << analysis.torusPatches.size()
+                      << " thickness-pairs=" << analysis.thicknessPairs.size()
+                      << " planar-openings=" << analysis.planarOpenings.size()
+                      << " datum-dimensions=" << analysis.datumDimensions.size()
+                      << " stud-features=" << analysis.studFeatures.size()
                       << " schema=" << analysis.schemaVersion << std::endl;
         }
 
@@ -1560,6 +2491,11 @@ int main(int argc, char** argv) {
                       << holeLocationDimensionCount(view)
                       << " callouts=" << view.holeCallouts.size()
                       << " notes=" << view.engineeringNotes.size()
+                      << " radius-callouts=" << view.radiusCallouts.size()
+                      << " thickness-dimensions="
+                      << view.thicknessDimensions.size()
+                      << " opening-dimensions="
+                      << view.openingDimensions.size()
                       << " size=" << number(view.bounds.width())
                       << " x " << number(view.bounds.height()) << " mm\n";
         }

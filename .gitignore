@@ -34,6 +34,8 @@ compile_commands.json
 __pycache__/
 *.py[cod]
 .pytest_cache/
+.venv/
+venv/
 
 # STEP inputs and generated analysis/projection results
 **/input/*

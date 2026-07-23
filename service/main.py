@@ -121,6 +121,9 @@ def write_metadata(directory: Path, metadata: dict) -> None:
 
 
 def run_command(arguments: list[str]) -> None:
+    executable = Path(arguments[0])
+    if executable.parent != Path(".") and not executable.is_file():
+        raise RuntimeError(f"处理程序不存在: {arguments[0]}")
     try:
         completed = subprocess.run(
             arguments,
@@ -134,7 +137,7 @@ def run_command(arguments: list[str]) -> None:
     except subprocess.TimeoutExpired as exc:
         raise RuntimeError(f"处理超时（{PROCESS_TIMEOUT} 秒）") from exc
     except OSError as exc:
-        raise RuntimeError(f"无法启动处理程序: {arguments[0]}") from exc
+        raise RuntimeError(f"无法启动处理程序 {arguments[0]}（请检查 OCCT DLL 是否在 PATH）") from exc
     if completed.returncode != 0:
         detail = (completed.stderr or completed.stdout).strip()
         raise RuntimeError(detail[-2000:] or f"处理程序退出码: {completed.returncode}")

@@ -1,0 +1,7 @@
+.git
+.tmp-*
+**/build
+**/input/*
+**/output/*
+__pycache__
+*.pyc

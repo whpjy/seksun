@@ -1,0 +1,31 @@
+name: seksun-measure
+
+services:
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile.service
+    image: seksun/meas-api:1.0.0
+    environment:
+      MEAS_MAX_UPLOAD_MB: "${MEAS_MAX_UPLOAD_MB:-200}"
+      MEAS_PROCESS_TIMEOUT_SECONDS: "${MEAS_PROCESS_TIMEOUT_SECONDS:-600}"
+      MEAS_MAX_CONCURRENT_JOBS: "${MEAS_MAX_CONCURRENT_JOBS:-2}"
+      MEAS_CORS_ORIGINS: "${MEAS_CORS_ORIGINS:-http://localhost:5173}"
+    volumes:
+      - meas-jobs:/data/jobs
+    ports:
+      - "8080:8080"
+    restart: unless-stopped
+
+  web:
+    build:
+      context: ../seksun-web
+    image: seksun/meas-web:1.0.0
+    depends_on:
+      - api
+    ports:
+      - "${WEB_PORT:-3000}:80"
+    restart: unless-stopped
+
+volumes:
+  meas-jobs:

@@ -1,0 +1,49 @@
+FROM ubuntu:24.04 AS builder
+
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        build-essential cmake ninja-build libtbb-dev nlohmann-json3-dev \
+        libocct-data-exchange-dev libocct-modeling-algorithms-dev \
+        libocct-ocaf-dev libocct-visualization-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /src/analyzer
+COPY occt-analyzer/CMakeLists.txt ./
+COPY occt-analyzer/src ./src
+RUN cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
+    && cmake --build build --parallel \
+    && cmake --install build --prefix /opt/meas
+
+WORKDIR /src/projector
+COPY occt-projector/CMakeLists.txt ./
+COPY occt-projector/src ./src
+RUN cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
+    && cmake --build build --parallel \
+    && cmake --install build --prefix /opt/meas
+
+FROM ubuntu:24.04
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    PATH="/opt/venv/bin:${PATH}" \
+    MEAS_STORAGE_ROOT=/data/jobs
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        python3 python3-venv libocct-data-exchange-7.6t64 \
+        libocct-modeling-algorithms-7.6t64 \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN python3 -m venv /opt/venv
+COPY service/requirements.txt /tmp/requirements.txt
+RUN pip install --no-cache-dir -r /tmp/requirements.txt
+COPY --from=builder /opt/meas/bin/occt-analyzer /usr/local/bin/
+COPY --from=builder /opt/meas/bin/occt-projector /usr/local/bin/
+COPY service /app/service
+
+RUN useradd --system --uid 10001 --create-home meas \
+    && mkdir -p /data/jobs \
+    && chown -R meas:meas /data/jobs
+USER meas
+WORKDIR /app
+EXPOSE 8080
+CMD ["uvicorn", "service.main:app", "--host", "0.0.0.0", "--port", "8080"]

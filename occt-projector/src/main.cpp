@@ -1,5 +1,7 @@
 #include <BRepAdaptor_Curve.hxx>
+#include <BRepBndLib.hxx>
 #include <BRep_Builder.hxx>
+#include <Bnd_Box.hxx>
 #include <GeomAbs_CurveType.hxx>
 #include <HLRAlgo_Projector.hxx>
 #include <HLRBRep_Algo.hxx>
@@ -21,6 +23,7 @@
 #include <nlohmann/json.hpp>
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <filesystem>
 #include <fstream>
@@ -85,6 +88,14 @@ struct HoleLocationTarget {
         std::numeric_limits<double>::quiet_NaN();
 };
 
+struct HoleLocationTableRow {
+    std::string id;
+    double horizontal = 0.0;
+    double vertical = 0.0;
+    std::vector<double> diameters;
+    int featureCount = 0;
+};
+
 struct EngineeringNote {
     std::string type;
     std::vector<std::string> lines;
@@ -146,12 +157,14 @@ struct ViewDefinition {
 
 struct ViewResult {
     ViewDefinition definition;
+    bool isPrimary = false;
     std::vector<Polyline> visible;
     std::vector<Polyline> hidden;
     std::vector<CircleEvidence> circleEvidence;
     std::vector<CenterMark> centerMarks;
     std::vector<HoleCallout> holeCallouts;
     std::vector<HoleLocationTarget> holeLocationTargets;
+    std::vector<HoleLocationTableRow> holeLocationTable;
     std::vector<EngineeringNote> engineeringNotes;
     std::vector<RadiusLeaderCallout> radiusCallouts;
     std::vector<ThicknessDimension> thicknessDimensions;
@@ -164,6 +177,8 @@ struct ViewPlacement {
     double offsetX = 0.0;
     double offsetY = 0.0;
 };
+
+const ViewResult* selectPrimaryView(const std::vector<ViewResult>& views);
 
 struct AnalysisHoleGroup {
     std::string id;
@@ -243,6 +258,33 @@ struct AnalysisStudFeature {
     std::vector<Segment> segments;
 };
 
+struct AnalysisThreadFeature {
+    std::string id;
+    std::string type;
+    std::string sourceStudId;
+    Point3 axis;
+    Point3 axisPoint;
+    double nominalDiameter = 0.0;
+    double pitch = 0.0;
+    double threadedLength = 0.0;
+    std::string assessment;
+};
+
+struct AnalysisChamferFeature {
+    std::string id;
+    std::string type;
+    std::string sourceStudId;
+    Point3 axis;
+    Point3 axisPoint;
+    double station = 0.0;
+    double axialLength = 0.0;
+    double radialDepth = 0.0;
+    double angleDegrees = 0.0;
+    double firstDiameter = 0.0;
+    double secondDiameter = 0.0;
+    std::string assessment;
+};
+
 struct AnalysisDatumDimension {
     std::string id;
     std::string featureId;
@@ -267,6 +309,8 @@ struct AnalysisData {
     std::vector<AnalysisPlanarOpening> planarOpenings;
     std::vector<AnalysisDatumDimension> datumDimensions;
     std::vector<AnalysisStudFeature> studFeatures;
+    std::vector<AnalysisThreadFeature> threadFeatures;
+    std::vector<AnalysisChamferFeature> chamferFeatures;
 };
 
 Point3 readPoint3(const nlohmann::json& value, const char* fieldName) {
@@ -364,6 +408,43 @@ AnalysisData readAnalysis(const fs::path& path, const fs::path& stepPath) {
                 }
             }
             result.studFeatures.push_back(std::move(stud));
+        }
+    }
+
+    if (json.contains("thread_features")) {
+        for (const nlohmann::json& item : json.at("thread_features")) {
+            AnalysisThreadFeature thread;
+            thread.id = item.value("id", std::string());
+            thread.type = item.value("type", std::string());
+            thread.sourceStudId = item.value("source_stud_id", std::string());
+            thread.axis = readPoint3(item.at("axis"), "thread_features.axis");
+            thread.axisPoint = readPoint3(
+                item.at("axis_point"), "thread_features.axis_point");
+            thread.nominalDiameter = item.value("nominal_diameter", 0.0);
+            thread.pitch = item.value("pitch", 0.0);
+            thread.threadedLength = item.value("threaded_length", 0.0);
+            thread.assessment = item.value("assessment", std::string());
+            result.threadFeatures.push_back(std::move(thread));
+        }
+    }
+
+    if (json.contains("chamfer_features")) {
+        for (const nlohmann::json& item : json.at("chamfer_features")) {
+            AnalysisChamferFeature chamfer;
+            chamfer.id = item.value("id", std::string());
+            chamfer.type = item.value("type", std::string());
+            chamfer.sourceStudId = item.value("source_stud_id", std::string());
+            chamfer.axis = readPoint3(item.at("axis"), "chamfer_features.axis");
+            chamfer.axisPoint = readPoint3(
+                item.at("axis_point"), "chamfer_features.axis_point");
+            chamfer.station = item.value("station", 0.0);
+            chamfer.axialLength = item.value("axial_length", 0.0);
+            chamfer.radialDepth = item.value("radial_depth", 0.0);
+            chamfer.angleDegrees = item.value("angle_degrees", 0.0);
+            chamfer.firstDiameter = item.value("first_diameter", 0.0);
+            chamfer.secondDiameter = item.value("second_diameter", 0.0);
+            chamfer.assessment = item.value("assessment", std::string());
+            result.chamferFeatures.push_back(std::move(chamfer));
         }
     }
 
@@ -497,7 +578,8 @@ std::vector<Polyline> sampleShape(
     const TopoDS_Shape& shape,
     Bounds2& bounds,
     std::vector<CircleEvidence>* circleEvidence = nullptr,
-    bool visibleEvidence = false) {
+    bool visibleEvidence = false,
+    const Bounds2* limit = nullptr) {
     std::vector<Polyline> result;
     if (shape.IsNull()) {
         return result;
@@ -554,15 +636,23 @@ std::vector<Polyline> sampleShape(
         Polyline line;
         const int count = sampleCount(curve);
         line.points.reserve(static_cast<std::size_t>(count));
+        bool insideLimit = true;
         for (int i = 0; i < count; ++i) {
             const double ratio = count == 1 ? 0.0 :
                 static_cast<double>(i) / static_cast<double>(count - 1);
             const gp_Pnt point = curve.Value(first + (last - first) * ratio);
             Point2 projected{point.X(), point.Y()};
             line.points.push_back(projected);
-            bounds.add(projected);
+            if (limit != nullptr &&
+                (projected.x < limit->minX || projected.x > limit->maxX ||
+                 projected.y < limit->minY || projected.y > limit->maxY)) {
+                insideLimit = false;
+            }
         }
-        if (line.points.size() >= 2) {
+        if (line.points.size() >= 2 && insideLimit) {
+            for (const Point2& point : line.points) {
+                bounds.add(point);
+            }
             result.push_back(std::move(line));
         }
     }
@@ -573,9 +663,10 @@ void appendSampled(std::vector<Polyline>& target,
                    const TopoDS_Shape& shape,
                    Bounds2& bounds,
                    std::vector<CircleEvidence>* circleEvidence = nullptr,
-                   bool visibleEvidence = false) {
+                   bool visibleEvidence = false,
+                   const Bounds2* limit = nullptr) {
     std::vector<Polyline> sampled = sampleShape(
-        shape, bounds, circleEvidence, visibleEvidence);
+        shape, bounds, circleEvidence, visibleEvidence, limit);
     target.insert(
         target.end(),
         std::make_move_iterator(sampled.begin()),
@@ -659,6 +750,42 @@ ViewResult project(const TopoDS_Shape& shape, const ViewDefinition& view) {
     HLRBRep_HLRToShape converted(algorithm);
     ViewResult result;
     result.definition = view;
+    Bnd_Box modelBox;
+    BRepBndLib::AddOptimal(shape, modelBox, Standard_False, Standard_False);
+    double xMin = 0.0;
+    double yMin = 0.0;
+    double zMin = 0.0;
+    double xMax = 0.0;
+    double yMax = 0.0;
+    double zMax = 0.0;
+    modelBox.Get(xMin, yMin, zMin, xMax, yMax, zMax);
+    Bounds2 projectionLimit;
+    const std::array<double, 2> xs = {xMin, xMax};
+    const std::array<double, 2> ys = {yMin, yMax};
+    const std::array<double, 2> zs = {zMin, zMax};
+    for (double x : xs) {
+        for (double y : ys) {
+            for (double z : zs) {
+                const Point3 corner{x, y, z};
+                const gp_Dir yDirection =
+                    view.direction.Crossed(view.xDirection);
+                projectionLimit.add({
+                    corner.x * view.xDirection.X() +
+                        corner.y * view.xDirection.Y() +
+                        corner.z * view.xDirection.Z(),
+                    corner.x * yDirection.X() +
+                        corner.y * yDirection.Y() +
+                        corner.z * yDirection.Z()});
+            }
+        }
+    }
+    const double margin = std::max(
+        0.5,
+        std::max(projectionLimit.width(), projectionLimit.height()) * 0.01);
+    projectionLimit.minX -= margin;
+    projectionLimit.maxX += margin;
+    projectionLimit.minY -= margin;
+    projectionLimit.maxY += margin;
     // A complete technical view combines sharp edges and silhouette edges.
     // Smooth tangent/sewn edges are intentionally omitted in this first version.
     appendSampled(
@@ -666,15 +793,29 @@ ViewResult project(const TopoDS_Shape& shape, const ViewDefinition& view) {
         converted.VCompound(),
         result.bounds,
         &result.circleEvidence,
-        true);
-    appendSampled(result.visible, converted.OutLineVCompound(), result.bounds);
+        true,
+        &projectionLimit);
+    appendSampled(
+        result.visible,
+        converted.OutLineVCompound(),
+        result.bounds,
+        nullptr,
+        false,
+        &projectionLimit);
     appendSampled(
         result.hidden,
         converted.HCompound(),
         result.bounds,
         &result.circleEvidence,
-        false);
-    appendSampled(result.hidden, converted.OutLineHCompound(), result.bounds);
+        false,
+        &projectionLimit);
+    appendSampled(
+        result.hidden,
+        converted.OutLineHCompound(),
+        result.bounds,
+        nullptr,
+        false,
+        &projectionLimit);
     buildCenterMarks(result);
     return result;
 }
@@ -954,6 +1095,74 @@ void buildHoleCallouts(std::vector<ViewResult>& views,
     }
 }
 
+void buildHoleLocationTable(std::vector<ViewResult>& views,
+                            const AnalysisData& analysis) {
+    const ViewResult* primaryConst = selectPrimaryView(views);
+    if (primaryConst == nullptr) {
+        return;
+    }
+    ViewResult* primary = nullptr;
+    for (ViewResult& view : views) {
+        if (view.definition.id == primaryConst->definition.id) {
+            primary = &view;
+            break;
+        }
+    }
+    if (primary == nullptr) {
+        return;
+    }
+
+    std::vector<double> horizontalCoordinates;
+    std::vector<double> verticalCoordinates;
+    for (const HoleLocationTarget& target : primary->holeLocationTargets) {
+        auto addUnique = [](std::vector<double>& values, double value) {
+            if (std::none_of(values.begin(), values.end(),
+                             [value](double existing) {
+                                 return std::abs(existing - value) <= 0.005;
+                             })) {
+                values.push_back(value);
+            }
+        };
+        addUnique(horizontalCoordinates, target.center.x);
+        addUnique(verticalCoordinates, target.center.y);
+    }
+    const std::size_t candidateCount = horizontalCoordinates.size() +
+                                       verticalCoordinates.size();
+    const std::size_t shownCount =
+        std::min<std::size_t>(horizontalCoordinates.size(), 6) +
+        std::min<std::size_t>(verticalCoordinates.size(), 6);
+    if (candidateCount <= shownCount) {
+        return;
+    }
+
+    const int primaryIndex = static_cast<int>(
+        std::distance(views.data(), primary));
+    for (const AnalysisHoleGroup& group : analysis.holeGroups) {
+        if (bestProjectionView(group, views) != primaryIndex) {
+            continue;
+        }
+        const Point2 point = projectPoint(group.center, primary->definition);
+        HoleLocationTableRow row;
+        row.id = group.id;
+        row.horizontal = point.x - primary->bounds.minX;
+        row.vertical = point.y - primary->bounds.minY;
+        row.diameters = group.diameters;
+        row.featureCount = static_cast<int>(group.featureIds.size());
+        primary->holeLocationTable.push_back(std::move(row));
+    }
+
+    std::sort(
+        primary->holeLocationTable.begin(),
+        primary->holeLocationTable.end(),
+        [](const HoleLocationTableRow& left,
+           const HoleLocationTableRow& right) {
+            if (std::abs(left.vertical - right.vertical) > 0.005) {
+                return left.vertical < right.vertical;
+            }
+            return left.horizontal < right.horizontal;
+        });
+}
+
 ViewResult* findView(std::vector<ViewResult>& views, const std::string& id) {
     for (ViewResult& view : views) {
         if (view.definition.id == id) {
@@ -1187,6 +1396,30 @@ void buildSpatialRadiusCallouts(ViewResult& view,
         view.radiusCallouts.begin(), view.radiusCallouts.end(),
         [](const RadiusLeaderCallout& left,
            const RadiusLeaderCallout& right) {
+            if (left.visibleMatches != right.visibleMatches) {
+                return left.visibleMatches > right.visibleMatches;
+            }
+            if (left.totalPairs != right.totalPairs) {
+                return left.totalPairs > right.totalPairs;
+            }
+            if (std::abs(left.target.y - right.target.y) > 1.0e-7) {
+                return left.target.y > right.target.y;
+            }
+            return left.target.x > right.target.x;
+        });
+
+    // Dense sheet-metal models can expose many valid bend-radius families.
+    // Keep at most five spatial leaders and report the remaining families in
+    // the compact BEND RADII note generated below.
+    constexpr std::size_t maximumSpatialRadiusCallouts = 5;
+    if (view.radiusCallouts.size() > maximumSpatialRadiusCallouts) {
+        view.radiusCallouts.resize(maximumSpatialRadiusCallouts);
+    }
+
+    std::sort(
+        view.radiusCallouts.begin(), view.radiusCallouts.end(),
+        [](const RadiusLeaderCallout& left,
+           const RadiusLeaderCallout& right) {
             if (std::abs(left.target.y - right.target.y) > 1.0e-7) {
                 return left.target.y > right.target.y;
             }
@@ -1372,18 +1605,21 @@ void buildEngineeringNotes(std::vector<ViewResult>& views,
     }
 
     if (!analysis.radiusPairs.empty()) {
-        ViewResult* front = findView(views, "front");
-        if (front != nullptr) {
-            buildSpatialRadiusCallouts(*front, analysis);
+        const ViewResult* primaryConst = selectPrimaryView(views);
+        ViewResult* primary = primaryConst == nullptr
+            ? nullptr
+            : findView(views, primaryConst->definition.id);
+        if (primary != nullptr) {
+            buildSpatialRadiusCallouts(*primary, analysis);
             const double span =
-                std::max(front->bounds.width(), front->bounds.height());
+                std::max(primary->bounds.width(), primary->bounds.height());
             EngineeringNote note;
             note.type = "bend-radii";
             note.lines.push_back("BEND RADII (REF)");
             for (const AnalysisRadiusPair& pair : analysis.radiusPairs) {
                 const bool spatiallyLocated = std::any_of(
-                    front->radiusCallouts.begin(),
-                    front->radiusCallouts.end(),
+                    primary->radiusCallouts.begin(),
+                    primary->radiusCallouts.end(),
                     [&pair](const RadiusLeaderCallout& callout) {
                         return std::abs(
                                    callout.innerRadius - pair.innerRadius) <=
@@ -1404,11 +1640,11 @@ void buildEngineeringNotes(std::vector<ViewResult>& views,
                     " / R" + dimensionNumber(pair.outerRadius));
             }
             note.label = {
-                front->bounds.maxX + std::max(10.0, span * 0.08),
-                front->radiusCallouts.empty()
-                    ? front->bounds.minY + span * 0.18
-                    : front->bounds.minY + span * 0.36};
-            front->engineeringNotes.push_back(std::move(note));
+                primary->bounds.maxX + std::max(10.0, span * 0.08),
+                primary->radiusCallouts.empty()
+                    ? primary->bounds.minY + span * 0.18
+                    : primary->bounds.minY + span * 0.36};
+            primary->engineeringNotes.push_back(std::move(note));
         }
     }
 
@@ -1448,6 +1684,41 @@ void buildEngineeringNotes(std::vector<ViewResult>& views,
             note.lines.push_back(
                 std::to_string(approvedStuds.size()) +
                 "X STUD");
+            std::vector<const AnalysisThreadFeature*> approvedThreads;
+            for (const AnalysisThreadFeature& thread : analysis.threadFeatures) {
+                if (thread.assessment ==
+                    "INFERRED_FROM_STUD_SHAFT_GEOMETRY") {
+                    approvedThreads.push_back(&thread);
+                }
+            }
+            if (!approvedThreads.empty()) {
+                const AnalysisThreadFeature& thread = *approvedThreads.front();
+                note.lines.push_back(
+                    std::to_string(approvedThreads.size()) + "X M" +
+                    dimensionNumber(thread.nominalDiameter) + " X " +
+                    dimensionNumber(thread.pitch) + " THREAD (INFERRED)");
+                note.lines.push_back(
+                    "THREAD LENGTH " +
+                    dimensionNumber(thread.threadedLength) + " REF");
+            }
+            std::vector<const AnalysisChamferFeature*> approvedChamfers;
+            for (const AnalysisChamferFeature& chamfer :
+                 analysis.chamferFeatures) {
+                if (chamfer.assessment ==
+                    "HIGH_CONFIDENCE_COAXIAL_STUD_TIP_CHAMFER") {
+                    approvedChamfers.push_back(&chamfer);
+                }
+            }
+            if (!approvedChamfers.empty()) {
+                const AnalysisChamferFeature& chamfer =
+                    *approvedChamfers.front();
+                note.lines.push_back(
+                    std::to_string(approvedChamfers.size()) +
+                    "X TIP CHAMFER " +
+                    dimensionNumber(chamfer.radialDepth) + " X " +
+                    dimensionNumber(chamfer.angleDegrees) +
+                    "&#176; (INFERRED)");
+            }
             note.lines.push_back(
                 "SHAFT &#216;" +
                 dimensionNumber(stud.nominalShaftDiameter) + " X " +
@@ -1465,9 +1736,12 @@ void buildEngineeringNotes(std::vector<ViewResult>& views,
         }
     }
 
-    ViewResult* front = findView(views, "front");
-    if (front != nullptr) {
-        buildOpeningDimension(*front, analysis);
+    const ViewResult* primaryConst = selectPrimaryView(views);
+    ViewResult* primary = primaryConst == nullptr
+        ? nullptr
+        : findView(views, primaryConst->definition.id);
+    if (primary != nullptr) {
+        buildOpeningDimension(*primary, analysis);
     }
 }
 
@@ -1510,9 +1784,87 @@ std::vector<AxisLocation> uniqueAxisLocations(
     return result;
 }
 
+// Keep the drawing readable on large assemblies.  The analyzer still
+// retains every measured hole; the projector only limits the number of
+// datum-to-hole dimensions drawn on the sheet.
+std::vector<AxisLocation> displayedAxisLocations(
+    const ViewResult& view,
+    bool horizontal) {
+    constexpr std::size_t maximumLocations = 6;
+    std::vector<AxisLocation> locations = uniqueAxisLocations(view, horizontal);
+    if (locations.size() <= maximumLocations) {
+        return locations;
+    }
+
+    const auto featurePriority = [&view](const AxisLocation& location) {
+        // A location representing several hole groups is normally the datum
+        // member of a recognized array and should be retained.
+        if (location.groupIds.size() > 1) {
+            return 100.0;
+        }
+
+        // A one-member diameter callout identifies a unique hole family.
+        // Its position carries more engineering information than one member
+        // of a large repeated-diameter bucket.
+        for (const HoleCallout& callout : view.holeCallouts) {
+            if (callout.groupIds.size() != 1) {
+                continue;
+            }
+            if (std::find(location.groupIds.begin(), location.groupIds.end(),
+                          callout.groupIds.front()) !=
+                location.groupIds.end()) {
+                return 60.0;
+            }
+        }
+        return 0.0;
+    };
+
+    std::vector<std::size_t> selectedIndices{0, locations.size() - 1};
+    const double coordinateSpan =
+        locations.back().coordinate - locations.front().coordinate;
+    while (selectedIndices.size() < maximumLocations) {
+        std::size_t bestIndex = locations.size();
+        double bestScore = -1.0;
+        for (std::size_t index = 1; index + 1 < locations.size(); ++index) {
+            if (std::find(selectedIndices.begin(), selectedIndices.end(), index) !=
+                selectedIndices.end()) {
+                continue;
+            }
+            double nearestSelected = std::numeric_limits<double>::infinity();
+            for (const std::size_t selectedIndex : selectedIndices) {
+                nearestSelected = std::min(
+                    nearestSelected,
+                    std::abs(locations[index].coordinate -
+                             locations[selectedIndex].coordinate));
+            }
+            const double spacingScore = coordinateSpan > kEpsilon
+                ? 30.0 * nearestSelected / coordinateSpan
+                : 0.0;
+            const double score = featurePriority(locations[index]) +
+                                 spacingScore;
+            if (score > bestScore + 1.0e-7) {
+                bestIndex = index;
+                bestScore = score;
+            }
+        }
+        if (bestIndex == locations.size()) {
+            break;
+        }
+        selectedIndices.push_back(bestIndex);
+    }
+
+    std::sort(selectedIndices.begin(), selectedIndices.end());
+    std::vector<AxisLocation> selected;
+    selected.reserve(selectedIndices.size());
+    for (const std::size_t index : selectedIndices) {
+        selected.push_back(locations[index]);
+    }
+    return selected;
+}
+
 int holeLocationDimensionCount(const ViewResult& view) {
-    return static_cast<int>(uniqueAxisLocations(view, true).size() +
-                            uniqueAxisLocations(view, false).size());
+    return static_cast<int>(displayedAxisLocations(view, true).size() +
+                            displayedAxisLocations(view, false).size());
 }
 
 double locationLaneGap(double span) {
@@ -1520,7 +1872,7 @@ double locationLaneGap(double span) {
 }
 
 double horizontalLocationDepth(const ViewResult& view) {
-    const std::size_t count = uniqueAxisLocations(view, true).size();
+    const std::size_t count = displayedAxisLocations(view, true).size();
     if (count == 0) {
         return 0.0;
     }
@@ -1531,7 +1883,7 @@ double horizontalLocationDepth(const ViewResult& view) {
 }
 
 double verticalLocationDepth(const ViewResult& view) {
-    const std::size_t count = uniqueAxisLocations(view, false).size();
+    const std::size_t count = displayedAxisLocations(view, false).size();
     if (count == 0) {
         return 0.0;
     }
@@ -1885,7 +2237,7 @@ void writeGroupIds(std::ofstream& output,
 void writeHorizontalHoleLocations(std::ofstream& output,
                                   const ViewResult& view) {
     const std::vector<AxisLocation> locations =
-        uniqueAxisLocations(view, true);
+        displayedAxisLocations(view, true);
     if (locations.empty()) {
         return;
     }
@@ -1951,7 +2303,7 @@ void writeHorizontalHoleLocations(std::ofstream& output,
 void writeVerticalHoleLocations(std::ofstream& output,
                                 const ViewResult& view) {
     const std::vector<AxisLocation> locations =
-        uniqueAxisLocations(view, false);
+        displayedAxisLocations(view, false);
     if (locations.empty()) {
         return;
     }
@@ -2115,7 +2467,7 @@ void writeVerticalDimension(std::ofstream& output,
 }
 
 int overallDimensionCount(const ViewResult& view) {
-    if (view.definition.id == "front") {
+    if (view.isPrimary) {
         return 2;
     }
     if (view.definition.id == "top") {
@@ -2129,13 +2481,13 @@ void writeOverallDimensions(std::ofstream& output, const ViewResult& view) {
     const double calloutClearance = view.holeCallouts.empty()
         ? 0.0
         : span * 0.40;
-    if (view.definition.id == "front") {
+    if (view.isPrimary) {
         writeHorizontalDimension(output, view.bounds, span);
         writeVerticalDimension(
             output,
             view.bounds,
             span,
-            "overall-height",
+            "overall-primary-height",
             calloutClearance);
     } else if (view.definition.id == "top") {
         writeVerticalDimension(
@@ -2185,7 +2537,97 @@ void writeDrawingStyle(std::ofstream& output) {
            << "'Microsoft YaHei', sans-serif; text-anchor: start; "
            << "dominant-baseline: central; paint-order: stroke; stroke: white; "
            << "stroke-width: 3px; stroke-linejoin: round; }\n"
+           << "    .hole-location-table rect, .hole-location-table line { "
+           << "stroke: #334155; stroke-width: 0.65; "
+           << "vector-effect: non-scaling-stroke; }\n"
+           << "    .hole-location-table text { fill: #0f172a; "
+           << "font-family: Arial, 'Microsoft YaHei', sans-serif; "
+           << "dominant-baseline: central; }\n"
            << "  </style>\n";
+}
+
+void writeHoleLocationTable(std::ofstream& output,
+                            const ViewResult& view) {
+    if (view.holeLocationTable.empty()) {
+        return;
+    }
+
+    const double span = std::max(view.bounds.width(), view.bounds.height());
+    const double fontSize = std::max(2.6, span * 0.018);
+    const double rowHeight = fontSize * 1.48;
+    const double tableWidth = std::max(72.0, span * 0.48);
+    const double titleHeight = rowHeight * 1.15;
+    const double x = view.bounds.maxX + std::max(18.0, span * 0.35);
+    const double top = view.bounds.maxY;
+    const std::array<double, 5> ratios = {0.0, 0.18, 0.39, 0.60, 0.86};
+    const double bodyHeight =
+        rowHeight * static_cast<double>(view.holeLocationTable.size() + 1);
+    const double totalHeight = titleHeight + bodyHeight;
+
+    output << "  <g class=\"hole-location-table\">\n";
+    output << "    <rect x=\"" << number(x) << "\" y=\""
+           << number(-top) << "\" width=\"" << number(tableWidth)
+           << "\" height=\"" << number(totalHeight)
+           << "\" fill=\"white\"/>\n";
+    output << "    <text x=\"" << number(x + tableWidth / 2.0)
+           << "\" y=\"" << number(-(top - titleHeight / 2.0))
+           << "\" font-size=\"" << number(fontSize)
+           << "\" font-weight=\"bold\" text-anchor=\"middle\">"
+           << "HOLE LOCATION TABLE (REF)</text>\n";
+
+    const double headerTop = top - titleHeight;
+    output << "    <line x1=\"" << number(x) << "\" y1=\""
+           << number(-headerTop) << "\" x2=\"" << number(x + tableWidth)
+           << "\" y2=\"" << number(-headerTop) << "\"/>\n";
+    for (std::size_t column = 1; column < ratios.size(); ++column) {
+        const double columnX = x + tableWidth * ratios[column];
+        output << "    <line x1=\"" << number(columnX) << "\" y1=\""
+               << number(-headerTop) << "\" x2=\"" << number(columnX)
+               << "\" y2=\"" << number(-(top - totalHeight))
+               << "\"/>\n";
+    }
+    for (std::size_t row = 0;
+         row <= view.holeLocationTable.size() + 1;
+         ++row) {
+        const double lineY = headerTop - static_cast<double>(row) * rowHeight;
+        output << "    <line x1=\"" << number(x) << "\" y1=\""
+               << number(-lineY) << "\" x2=\"" << number(x + tableWidth)
+               << "\" y2=\"" << number(-lineY) << "\"/>\n";
+    }
+
+    const auto cellCenter = [x, tableWidth, &ratios](std::size_t column) {
+        const double left = ratios[column];
+        const double right = column + 1 < ratios.size()
+            ? ratios[column + 1]
+            : 1.0;
+        return x + tableWidth * (left + right) / 2.0;
+    };
+    const std::array<std::string, 5> headers = {"ID", "X", "Y", "DIA", "QTY"};
+    const auto writeCell = [&output, fontSize](double cellX,
+                                               double cellY,
+                                               const std::string& value,
+                                               bool bold = false) {
+        output << "    <text x=\"" << number(cellX) << "\" y=\""
+               << number(-cellY) << "\" font-size=\"" << number(fontSize)
+               << "\" text-anchor=\"middle\"";
+        if (bold) output << " font-weight=\"bold\"";
+        output << '>' << value << "</text>\n";
+    };
+    const double headerCenter = headerTop - rowHeight / 2.0;
+    for (std::size_t column = 0; column < headers.size(); ++column) {
+        writeCell(cellCenter(column), headerCenter, headers[column], true);
+    }
+    for (std::size_t row = 0; row < view.holeLocationTable.size(); ++row) {
+        const HoleLocationTableRow& item = view.holeLocationTable[row];
+        const double centerY =
+            headerTop - (static_cast<double>(row) + 1.5) * rowHeight;
+        writeCell(cellCenter(0), centerY, item.id);
+        writeCell(cellCenter(1), centerY, dimensionNumber(item.horizontal));
+        writeCell(cellCenter(2), centerY, dimensionNumber(item.vertical));
+        writeCell(cellCenter(3), centerY, diameterText(item.diameters));
+        writeCell(cellCenter(4), centerY, std::to_string(item.featureCount));
+    }
+    output << "  </g>\n";
 }
 
 void writeSvg(const fs::path& path, const ViewResult& view) {
@@ -2207,7 +2649,9 @@ void writeSvg(const fs::path& path, const ViewResult& view) {
         topMargin = std::max(topMargin, span * 0.16);
     }
     double rightMargin = span * 0.08;
-    if (!view.holeCallouts.empty()) {
+    if (!view.holeLocationTable.empty()) {
+        rightMargin = span * 0.92;
+    } else if (!view.holeCallouts.empty()) {
         rightMargin = span * 0.46;
     } else if (!view.engineeringNotes.empty()) {
         rightMargin = span * 0.20;
@@ -2244,6 +2688,7 @@ void writeSvg(const fs::path& path, const ViewResult& view) {
     writeOpeningDimensions(output, view);
     writeEngineeringNotes(output, view);
     writeRadiusCallouts(output, view);
+    writeHoleLocationTable(output, view);
     output << "</svg>\n";
 }
 
@@ -2269,6 +2714,7 @@ void writePlacedView(std::ofstream& output, const ViewPlacement& placement) {
     writeOpeningDimensions(output, *placement.view);
     writeEngineeringNotes(output, *placement.view);
     writeRadiusCallouts(output, *placement.view);
+    writeHoleLocationTable(output, *placement.view);
     output << "  </g>\n";
 }
 
@@ -2308,12 +2754,16 @@ void writeFirstAngleSheet(const fs::path& path,
     }
 
     bool hasHoleCallouts = false;
+    bool hasHoleLocationTable = false;
     for (const ViewPlacement& placement : placements) {
         hasHoleCallouts = hasHoleCallouts || !placement.view->holeCallouts.empty();
+        hasHoleLocationTable =
+            hasHoleLocationTable || !placement.view->holeLocationTable.empty();
     }
     const double sheetSpan = std::max(sheetBounds.width(), sheetBounds.height());
     const double leftMargin = sheetSpan * 0.06;
-    const double rightMargin = sheetSpan * (hasHoleCallouts ? 0.31 : 0.10);
+    const double rightMargin = sheetSpan *
+        (hasHoleLocationTable ? 0.78 : (hasHoleCallouts ? 0.31 : 0.10));
     const double topMargin = sheetSpan * 0.12;
     const double bottomMargin = sheetSpan * 0.06;
     const double viewX = sheetBounds.minX - leftMargin;
@@ -2343,6 +2793,21 @@ void writeFirstAngleSheet(const fs::path& path,
     output << "</svg>\n";
 }
 
+const ViewResult* selectPrimaryView(const std::vector<ViewResult>& views) {
+    const ViewResult* selected = nullptr;
+    double selectedArea = -1.0;
+    for (const ViewResult& view : views) {
+        const double area = view.bounds.width() * view.bounds.height();
+        if (selected == nullptr || area > selectedArea + 1.0e-6 ||
+            (std::abs(area - selectedArea) <= 1.0e-6 &&
+             view.visible.size() > selected->visible.size())) {
+            selected = &view;
+            selectedArea = area;
+        }
+    }
+    return selected;
+}
+
 void writeManifest(const fs::path& path,
                    const fs::path& source,
                    const std::vector<ViewResult>& views,
@@ -2352,12 +2817,16 @@ void writeManifest(const fs::path& path,
         throw std::runtime_error("Cannot create manifest: " + path.string());
     }
 
+    const ViewResult* primary = selectPrimaryView(views);
     output << "{\n"
-           << "  \"schema_version\": \"0.16.0\",\n"
+           << "  \"schema_version\": \"0.26.0\",\n"
            << "  \"source_file\": \"" << source.filename().string() << "\",\n"
            << "  \"units\": \"mm\",\n"
            << "  \"projection_method\": \"FIRST_ANGLE\",\n"
            << "  \"combined_view\": \"three_views.svg\",\n";
+    output << "  \"primary_view\": \""
+           << (primary == nullptr ? std::string() : primary->definition.id)
+           << "\",\n";
     if (analysis != nullptr) {
         output << "  \"analysis\": {\"file\": \""
                << analysis->sourcePath.filename().string()
@@ -2378,6 +2847,10 @@ void writeManifest(const fs::path& path,
                << analysis->datumDimensions.size()
                << ", \"stud_features\": "
                << analysis->studFeatures.size()
+               << ", \"thread_features\": "
+               << analysis->threadFeatures.size()
+               << ", \"chamfer_features\": "
+               << analysis->chamferFeatures.size()
                << "},\n";
     } else {
         output << "  \"analysis\": null,\n";
@@ -2388,12 +2861,32 @@ void writeManifest(const fs::path& path,
         const ViewResult& view = views[i];
         output << "    {\"id\": \"" << view.definition.id
                << "\", \"file\": \"" << view.definition.id << ".svg\""
+               << ", \"primary\": "
+               << ((primary != nullptr && primary == &view) ? "true" : "false")
+               << ", \"projected_area\": "
+               << number(view.bounds.width() * view.bounds.height())
                << ", \"visible_edges\": " << view.visible.size()
                << ", \"hidden_edges\": " << view.hidden.size()
                << ", \"center_marks\": " << view.centerMarks.size()
                << ", \"overall_dimensions\": " << overallDimensionCount(view)
                << ", \"hole_location_dimensions\": "
                << holeLocationDimensionCount(view)
+               << ", \"hole_location_candidates\": "
+               << (uniqueAxisLocations(view, true).size() +
+                   uniqueAxisLocations(view, false).size())
+               << ", \"hole_location_suppressed\": "
+               << ((uniqueAxisLocations(view, true).size() +
+                    uniqueAxisLocations(view, false).size()) -
+                   (displayedAxisLocations(view, true).size() +
+                    displayedAxisLocations(view, false).size()))
+               << ", \"hole_location_axes\": {\"horizontal\": {\"shown\": "
+               << displayedAxisLocations(view, true).size()
+               << ", \"candidates\": "
+               << uniqueAxisLocations(view, true).size()
+               << "}, \"vertical\": {\"shown\": "
+               << displayedAxisLocations(view, false).size()
+               << ", \"candidates\": "
+               << uniqueAxisLocations(view, false).size() << "}}"
                << ", \"hole_location_reference\": {\"horizontal\": "
                << "\"LEFT_PROJECTION_BOUND\", \"vertical\": "
                << "\"BOTTOM_PROJECTION_BOUND\"}"
@@ -2401,6 +2894,12 @@ void writeManifest(const fs::path& path,
                << ", \"engineering_notes\": "
                << view.engineeringNotes.size()
                << ", \"radius_callouts\": " << view.radiusCallouts.size()
+               << ", \"hole_location_table_rows\": "
+               << view.holeLocationTable.size()
+               << ", \"hole_location_table_scope\": "
+               << (view.holeLocationTable.empty()
+                       ? "null"
+                       : "\"PRIMARY_VIEW_HOLE_GROUPS\"")
                << ", \"thickness_dimensions\": "
                << view.thicknessDimensions.size()
                << ", \"opening_dimensions\": "
@@ -2444,6 +2943,8 @@ int main(int argc, char** argv) {
                       << " planar-openings=" << analysis.planarOpenings.size()
                       << " datum-dimensions=" << analysis.datumDimensions.size()
                       << " stud-features=" << analysis.studFeatures.size()
+                      << " thread-features=" << analysis.threadFeatures.size()
+                      << " chamfer-features=" << analysis.chamferFeatures.size()
                       << " schema=" << analysis.schemaVersion << std::endl;
         }
 
@@ -2460,8 +2961,16 @@ int main(int argc, char** argv) {
             std::cout << "Projecting " << definition.id << " view..." << std::endl;
             views.push_back(project(shape, definition));
         }
+        const ViewResult* primaryView = selectPrimaryView(views);
+        if (primaryView != nullptr) {
+            const std::string primaryId = primaryView->definition.id;
+            for (ViewResult& view : views) {
+                view.isPrimary = view.definition.id == primaryId;
+            }
+        }
         if (analysisPointer != nullptr) {
             buildHoleCallouts(views, *analysisPointer);
+            buildHoleLocationTable(views, *analysisPointer);
             buildEngineeringNotes(views, *analysisPointer);
         }
         for (const ViewResult& view : views) {
@@ -2496,10 +3005,16 @@ int main(int argc, char** argv) {
                       << view.thicknessDimensions.size()
                       << " opening-dimensions="
                       << view.openingDimensions.size()
+                      << " hole-table-rows="
+                      << view.holeLocationTable.size()
                       << " size=" << number(view.bounds.width())
                       << " x " << number(view.bounds.height()) << " mm\n";
         }
         std::cout << "  combined: three_views.svg (FIRST_ANGLE)\n";
+        const ViewResult* primary = selectPrimaryView(views);
+        std::cout << "  primary view: "
+                  << (primary == nullptr ? "NONE" : primary->definition.id)
+                  << '\n';
         std::cout << "Output: " << outputDirectory.string() << std::endl;
         return 0;
     } catch (const Standard_Failure& failure) {

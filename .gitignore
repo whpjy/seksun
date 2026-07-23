@@ -1,0 +1,55 @@
+# Local editor and OS files
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Temporary review/render artifacts
+.tmp-*/
+.tmp*/
+*.tmp
+*.log
+
+# CMake and native build outputs
+**/build/
+**/cmake-build-*/
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+build.ninja
+.ninja_*
+compile_commands.json
+*.o
+*.obj
+*.a
+*.lib
+*.so
+*.dll
+*.dylib
+*.exe
+*.pdb
+
+# Python caches
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# STEP inputs and generated analysis/projection results
+**/input/*
+!**/input/.gitkeep
+**/output/*
+!**/output/.gitkeep
+*.stp
+*.step
+
+# Local data packages and exported bundles
+*.zip
+*.7z
+*.tar
+*.tar.gz
+
+# Local environment and secrets
+.env
+.env.*
+!.env.example

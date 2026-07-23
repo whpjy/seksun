@@ -38,6 +38,7 @@
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace fs = std::filesystem;
@@ -135,6 +136,33 @@ struct StudFeature {
     std::string assessment = "NOT_IDENTIFIED";
     std::vector<double> diameters;
     std::vector<CylinderPatch> segments;
+};
+
+struct ThreadFeature {
+    std::string id;
+    std::string type;
+    std::string source_stud_id;
+    Point3 axis;
+    Point3 axis_point;
+    double nominal_diameter = 0.0;
+    double pitch = 0.0;
+    double threaded_length = 0.0;
+    std::string assessment;
+};
+
+struct ChamferFeature {
+    std::string id;
+    std::string type;
+    std::string source_stud_id;
+    Point3 axis;
+    Point3 axis_point;
+    double station = 0.0;
+    double axial_length = 0.0;
+    double radial_depth = 0.0;
+    double angle_degrees = 0.0;
+    double first_diameter = 0.0;
+    double second_diameter = 0.0;
+    std::string assessment;
 };
 
 struct HoleAxisGroup {
@@ -1331,6 +1359,136 @@ std::vector<StudFeature> build_stud_features(
     return result;
 }
 
+double iso_metric_coarse_pitch(double nominal_diameter) {
+    const std::vector<std::pair<double, double>> sizes = {
+        {3.0, 0.5}, {4.0, 0.7}, {5.0, 0.8}, {6.0, 1.0},
+        {8.0, 1.25}, {10.0, 1.5}, {12.0, 1.75},
+        {14.0, 2.0}, {16.0, 2.0}, {18.0, 2.5}, {20.0, 2.5}};
+    for (const auto& size : sizes) {
+        if (std::abs(nominal_diameter - size.first) <= 0.15) {
+            return size.second;
+        }
+    }
+    return 0.0;
+}
+
+std::vector<ThreadFeature> build_thread_features(
+    const std::vector<StudFeature>& studs) {
+    std::vector<ThreadFeature> result;
+    int number = 0;
+    for (const StudFeature& stud : studs) {
+        if (stud.assessment != "HIGH_CONFIDENCE_STEPPED_STUD") {
+            continue;
+        }
+        const double pitch =
+            iso_metric_coarse_pitch(stud.nominal_shaft_diameter);
+        if (pitch <= Epsilon) {
+            continue;
+        }
+        double threaded_length = 0.0;
+        for (const CylinderPatch& segment : stud.segments) {
+            if (std::abs(segment.diameter -
+                         stud.nominal_shaft_diameter) <= 0.15) {
+                threaded_length = std::max(
+                    threaded_length,
+                    segment.maximum_station - segment.minimum_station);
+            }
+        }
+        if (threaded_length <= Epsilon) {
+            continue;
+        }
+        ThreadFeature thread;
+        std::ostringstream id;
+        id << "TF" << std::setw(3) << std::setfill('0') << ++number;
+        thread.id = id.str();
+        thread.type = "EXTERNAL_METRIC_THREAD_INFERRED";
+        thread.source_stud_id = stud.id;
+        thread.axis = stud.axis;
+        thread.axis_point = stud.axis_point;
+        thread.nominal_diameter =
+            std::round(stud.nominal_shaft_diameter);
+        thread.pitch = pitch;
+        thread.threaded_length = threaded_length;
+        thread.assessment = "INFERRED_FROM_STUD_SHAFT_GEOMETRY";
+        result.push_back(std::move(thread));
+    }
+    return result;
+}
+
+std::vector<ChamferFeature> build_chamfer_features(
+    const std::vector<StudFeature>& studs) {
+    constexpr double radians_to_degrees = 57.29577951308232;
+    std::vector<ChamferFeature> result;
+    int number = 0;
+    for (const StudFeature& stud : studs) {
+        if (stud.assessment != "HIGH_CONFIDENCE_STEPPED_STUD") {
+            continue;
+        }
+        const CylinderPatch* tip = nullptr;
+        const CylinderPatch* shaft = nullptr;
+        for (const CylinderPatch& segment : stud.segments) {
+            if (std::abs(segment.diameter - stud.tip_diameter) <= 0.02 &&
+                (tip == nullptr ||
+                 segment.maximum_station - segment.minimum_station >
+                     tip->maximum_station - tip->minimum_station)) {
+                tip = &segment;
+            }
+            if (std::abs(segment.diameter -
+                         stud.nominal_shaft_diameter) <= 0.02 &&
+                (shaft == nullptr ||
+                 segment.maximum_station - segment.minimum_station >
+                     shaft->maximum_station - shaft->minimum_station)) {
+                shaft = &segment;
+            }
+        }
+        if (tip == nullptr || shaft == nullptr) {
+            continue;
+        }
+
+        double axial_length = 0.0;
+        double station = 0.0;
+        if (tip->maximum_station <= shaft->minimum_station) {
+            axial_length = shaft->minimum_station - tip->maximum_station;
+            station = (shaft->minimum_station + tip->maximum_station) / 2.0;
+        } else if (shaft->maximum_station <= tip->minimum_station) {
+            axial_length = tip->minimum_station - shaft->maximum_station;
+            station = (tip->minimum_station + shaft->maximum_station) / 2.0;
+        } else {
+            continue;
+        }
+        const double radial_depth =
+            std::abs(stud.nominal_shaft_diameter - stud.tip_diameter) / 2.0;
+        if (axial_length < 0.02 || axial_length > 5.0 ||
+            radial_depth < 0.02 || radial_depth > 5.0) {
+            continue;
+        }
+        const double angle =
+            std::atan2(radial_depth, axial_length) * radians_to_degrees;
+        if (angle < 20.0 || angle > 70.0) {
+            continue;
+        }
+
+        ChamferFeature chamfer;
+        std::ostringstream id;
+        id << "CH" << std::setw(3) << std::setfill('0') << ++number;
+        chamfer.id = id.str();
+        chamfer.type = "STUD_TIP_CHAMFER_INFERRED";
+        chamfer.source_stud_id = stud.id;
+        chamfer.axis = stud.axis;
+        chamfer.axis_point = stud.axis_point;
+        chamfer.station = station;
+        chamfer.axial_length = axial_length;
+        chamfer.radial_depth = radial_depth;
+        chamfer.angle_degrees = angle;
+        chamfer.first_diameter = stud.nominal_shaft_diameter;
+        chamfer.second_diameter = stud.tip_diameter;
+        chamfer.assessment =
+            "HIGH_CONFIDENCE_COAXIAL_STUD_TIP_CHAMFER";
+        result.push_back(std::move(chamfer));
+    }
+    return result;
+}
+
 std::vector<HoleAxisGroup> build_hole_axis_groups(
     const std::vector<AxialFeature>& features) {
     std::vector<HoleAxisGroup> groups;
@@ -1662,6 +1820,57 @@ void append_stud_features(
     json << "]";
 }
 
+void append_thread_features(
+    std::ostringstream& json,
+    const std::vector<ThreadFeature>& threads) {
+    json << "[";
+    if (!threads.empty()) json << '\n';
+    for (std::size_t index = 0; index < threads.size(); ++index) {
+        const ThreadFeature& thread = threads[index];
+        json << "    {\"id\": \"" << thread.id
+             << "\", \"type\": \"" << thread.type
+             << "\", \"source_stud_id\": \"" << thread.source_stud_id
+             << "\", \"axis\": ";
+        append_point(json, thread.axis);
+        json << ", \"axis_point\": ";
+        append_point(json, thread.axis_point);
+        json << ", \"nominal_diameter\": " << thread.nominal_diameter
+             << ", \"pitch\": " << thread.pitch
+             << ", \"threaded_length\": " << thread.threaded_length
+             << ", \"assessment\": \"" << thread.assessment << "\"}"
+             << (index + 1 < threads.size() ? "," : "") << '\n';
+    }
+    if (!threads.empty()) json << "  ";
+    json << "]";
+}
+
+void append_chamfer_features(
+    std::ostringstream& json,
+    const std::vector<ChamferFeature>& chamfers) {
+    json << "[";
+    if (!chamfers.empty()) json << '\n';
+    for (std::size_t index = 0; index < chamfers.size(); ++index) {
+        const ChamferFeature& chamfer = chamfers[index];
+        json << "    {\"id\": \"" << chamfer.id
+             << "\", \"type\": \"" << chamfer.type
+             << "\", \"source_stud_id\": \"" << chamfer.source_stud_id
+             << "\", \"axis\": ";
+        append_point(json, chamfer.axis);
+        json << ", \"axis_point\": ";
+        append_point(json, chamfer.axis_point);
+        json << ", \"station\": " << chamfer.station
+             << ", \"axial_length\": " << chamfer.axial_length
+             << ", \"radial_depth\": " << chamfer.radial_depth
+             << ", \"angle_degrees\": " << chamfer.angle_degrees
+             << ", \"first_diameter\": " << chamfer.first_diameter
+             << ", \"second_diameter\": " << chamfer.second_diameter
+             << ", \"assessment\": \"" << chamfer.assessment << "\"}"
+             << (index + 1 < chamfers.size() ? "," : "") << '\n';
+    }
+    if (!chamfers.empty()) json << "  ";
+    json << "]";
+}
+
 void append_string_array(
     std::ostringstream& json,
     const std::vector<std::string>& values) {
@@ -1941,6 +2150,8 @@ std::string make_json(
     const std::vector<BodySurfaceSummary>& bodies,
     const std::vector<AxialFeature>& axial_features,
     const std::vector<StudFeature>& stud_features,
+    const std::vector<ThreadFeature>& thread_features,
+    const std::vector<ChamferFeature>& chamfer_features,
     const std::vector<HoleAxisGroup>& hole_axis_groups,
     const std::vector<HolePattern>& hole_patterns,
     const std::vector<DatumDimension>& datum_dimensions,
@@ -1954,7 +2165,7 @@ std::string make_json(
     std::ostringstream json;
     json << std::fixed << std::setprecision(6);
     json << "{\n"
-             << "  \"schema_version\": \"0.16.0\",\n"
+             << "  \"schema_version\": \"0.18.0\",\n"
          << "  \"source_file\": \"" << json_escape(input.filename().string()) << "\",\n"
          << "  \"units\": {\"length\": \"mm\", \"area\": \"mm^2\", \"volume\": \"mm^3\"},\n"
          << "  \"topology\": {\n"
@@ -1995,6 +2206,12 @@ std::string make_json(
     json << ",\n"
          << "  \"stud_features\": ";
     append_stud_features(json, stud_features);
+    json << ",\n"
+         << "  \"thread_features\": ";
+    append_thread_features(json, thread_features);
+    json << ",\n"
+         << "  \"chamfer_features\": ";
+    append_chamfer_features(json, chamfer_features);
     json << ",\n"
          << "  \"hole_axis_groups\": ";
     append_hole_axis_groups(json, hole_axis_groups);
@@ -2099,6 +2316,10 @@ int main(int argc, char* argv[]) {
             build_axial_features(full_cylinder_patches);
         const std::vector<StudFeature> stud_features =
             build_stud_features(axial_features);
+        const std::vector<ThreadFeature> thread_features =
+            build_thread_features(stud_features);
+        const std::vector<ChamferFeature> chamfer_features =
+            build_chamfer_features(stud_features);
         const std::vector<HoleAxisGroup> hole_axis_groups =
             build_hole_axis_groups(axial_features);
         const std::vector<HolePattern> hole_patterns =
@@ -2155,6 +2376,8 @@ int main(int argc, char* argv[]) {
             bodies,
             axial_features,
             stud_features,
+            thread_features,
+            chamfer_features,
             hole_axis_groups,
             hole_patterns,
             datum_dimensions,

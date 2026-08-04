@@ -1955,6 +1955,10 @@ void writeHoleCallouts(std::ofstream& output,
             output << callout.groupIds[index];
         }
         output << "\">\n";
+        output << "    <circle class=\"feature-target\" cx=\""
+               << number(callout.target.x) << "\" cy=\""
+               << number(-callout.target.y) << "\" r=\""
+               << number(callout.radius) << "\"/>\n";
         output << "    <polyline class=\"leader\" points=\""
                << number(startX) << ',' << number(-startY) << ' '
                << number(elbowX) << ',' << number(-callout.label.y) << ' '
@@ -2520,6 +2524,9 @@ void writeDrawingStyle(std::ofstream& output) {
            << "    .hole-callout .leader { fill: none; stroke: #0f172a; "
            << "stroke-width: 0.75; vector-effect: non-scaling-stroke; }\n"
            << "    .hole-callout .leader-dot { fill: #0f172a; }\n"
+           << "    .hole-callout .feature-target { fill: transparent; "
+           << "stroke: transparent; stroke-width: 1; "
+           << "vector-effect: non-scaling-stroke; pointer-events: none; }\n"
            << "    .hole-callout text { fill: #0f172a; font-family: Arial, "
            << "'Microsoft YaHei', sans-serif; text-anchor: start; "
            << "dominant-baseline: central; paint-order: stroke; stroke: white; "

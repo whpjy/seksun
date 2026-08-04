@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import os
 import re
@@ -18,6 +19,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
+from service.comparison import compare_c10_from_analysis
+
 
 APP_VERSION = "1.0.0"
 STORAGE_ROOT = Path(os.getenv("MEAS_STORAGE_ROOT", "/data/jobs")).resolve()
@@ -29,12 +32,20 @@ MAX_CONCURRENT_JOBS = max(1, int(os.getenv("MEAS_MAX_CONCURRENT_JOBS", "2")))
 CHUNK_SIZE = 1024 * 1024
 ALLOWED_RESULTS = {
     "analysis.json",
+    "comparison.json",
     "front.svg",
     "top.svg",
     "right.svg",
     "three_views.svg",
     "views.json",
 }
+ROOT_RESULTS = {"analysis.json", "comparison.json"}
+PDF_EXTRACTION_ROOT = Path(
+    os.getenv(
+        "MEAS_PDF_EXTRACTION_ROOT",
+        str(Path(__file__).resolve().parents[1] / "data" / "pdf-extractions"),
+    )
+).resolve()
 
 job_slots = asyncio.Semaphore(MAX_CONCURRENT_JOBS)
 
@@ -62,6 +73,20 @@ class JobResponse(BaseModel):
     size: int
     elapsed_seconds: float
     results: ResultLinks
+
+
+class ComparisonLinks(ResultLinks):
+    comparison: str
+
+
+class ComparisonJobResponse(BaseModel):
+    id: str
+    status: str
+    pdf_filename: str
+    step_filename: str
+    elapsed_seconds: float
+    comparison: dict
+    results: ComparisonLinks
 
 
 app = FastAPI(
@@ -114,6 +139,24 @@ def build_response(metadata: dict) -> JobResponse:
     )
 
 
+def build_comparison_response(metadata: dict, comparison: dict) -> ComparisonJobResponse:
+    job_id = metadata["id"]
+    return ComparisonJobResponse(
+        **metadata,
+        comparison=comparison,
+        results=ComparisonLinks(
+            analysis=file_url(job_id, "analysis.json"),
+            comparison=file_url(job_id, "comparison.json"),
+            front=file_url(job_id, "front.svg"),
+            top=file_url(job_id, "top.svg"),
+            right=file_url(job_id, "right.svg"),
+            three_views=file_url(job_id, "three_views.svg"),
+            manifest=file_url(job_id, "views.json"),
+            archive=f"/api/v1/jobs/{job_id}/download",
+        ),
+    )
+
+
 def write_metadata(directory: Path, metadata: dict) -> None:
     (directory / "job.json").write_text(
         json.dumps(metadata, ensure_ascii=False, indent=2), encoding="utf-8"
@@ -151,6 +194,59 @@ def process_step(directory: Path, source: Path) -> None:
     run_command([PROJECTOR_BIN, str(source), str(views_dir), str(analysis_path)])
 
 
+def find_pdf_extraction(pdf_path: Path) -> Path:
+    digest = hashlib.sha256(pdf_path.read_bytes()).hexdigest().upper()
+    if not PDF_EXTRACTION_ROOT.is_dir():
+        raise RuntimeError("PDF 提取数据目录不存在")
+    for analysis_path in PDF_EXTRACTION_ROOT.glob("*/drawing_analysis.json"):
+        try:
+            drawing = json.loads(analysis_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        expected = str(drawing.get("source", {}).get("sha256", "")).upper()
+        if expected == digest:
+            return analysis_path.parent
+    raise RuntimeError("该 PDF 尚未生成矢量测量计划")
+
+
+def process_pdf_step_comparison(directory: Path, pdf_path: Path, step_path: Path) -> dict:
+    process_step(directory, step_path)
+    extraction = find_pdf_extraction(pdf_path)
+    measurement_plan = json.loads(
+        (extraction / "measurement_plan.json").read_text(encoding="utf-8")
+    )
+    vector_extraction = json.loads(
+        (extraction / "vector_extraction.json").read_text(encoding="utf-8")
+    )
+    step_analysis = json.loads((directory / "analysis.json").read_text(encoding="utf-8"))
+    comparison = compare_c10_from_analysis(
+        measurement_plan,
+        vector_extraction,
+        step_analysis,
+    )
+    (directory / "comparison.json").write_text(
+        json.dumps(comparison, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    return comparison
+
+
+async def save_upload(file: UploadFile, target: Path) -> int:
+    size = 0
+    with target.open("wb") as stream:
+        while chunk := await file.read(CHUNK_SIZE):
+            size += len(chunk)
+            if size > MAX_UPLOAD_BYTES:
+                raise HTTPException(
+                    status_code=413,
+                    detail=f"文件不能超过 {MAX_UPLOAD_BYTES // 1024 // 1024} MB",
+                )
+            stream.write(chunk)
+    if size == 0:
+        raise HTTPException(status_code=400, detail="上传文件为空")
+    return size
+
+
 @app.get("/health")
 def health() -> dict:
     return {"status": "ok", "version": APP_VERSION}
@@ -171,17 +267,7 @@ async def create_job(file: Annotated[UploadFile, File(...)]) -> JobResponse:
     started = time.perf_counter()
 
     try:
-        with source.open("wb") as stream:
-            while chunk := await file.read(CHUNK_SIZE):
-                size += len(chunk)
-                if size > MAX_UPLOAD_BYTES:
-                    raise HTTPException(
-                        status_code=413,
-                        detail=f"文件不能超过 {MAX_UPLOAD_BYTES // 1024 // 1024} MB",
-                    )
-                stream.write(chunk)
-        if size == 0:
-            raise HTTPException(status_code=400, detail="上传文件为空")
+        size = await save_upload(file, source)
 
         async with job_slots:
             await asyncio.to_thread(process_step, directory, source)
@@ -213,6 +299,62 @@ async def create_job(file: Annotated[UploadFile, File(...)]) -> JobResponse:
         await file.close()
 
 
+@app.post("/api/v1/comparisons", response_model=ComparisonJobResponse)
+async def create_comparison(
+    pdf: Annotated[UploadFile, File(...)],
+    step: Annotated[UploadFile, File(...)],
+) -> ComparisonJobResponse:
+    pdf_name = safe_filename(pdf.filename)
+    step_name = safe_filename(step.filename)
+    if Path(pdf_name).suffix.lower() != ".pdf":
+        raise HTTPException(status_code=415, detail="2D 图纸仅支持 .pdf 文件")
+    if Path(step_name).suffix.lower() not in {".stp", ".step"}:
+        raise HTTPException(status_code=415, detail="3D 模型仅支持 .stp 或 .step 文件")
+
+    job_id = uuid.uuid4().hex
+    directory = job_dir(job_id)
+    directory.mkdir(parents=True)
+    pdf_path = directory / pdf_name
+    step_path = directory / step_name
+    started = time.perf_counter()
+    try:
+        await save_upload(pdf, pdf_path)
+        await save_upload(step, step_path)
+        async with job_slots:
+            comparison = await asyncio.to_thread(
+                process_pdf_step_comparison,
+                directory,
+                pdf_path,
+                step_path,
+            )
+        metadata = {
+            "id": job_id,
+            "status": "completed",
+            "pdf_filename": pdf_name,
+            "step_filename": step_name,
+            "elapsed_seconds": round(time.perf_counter() - started, 3),
+        }
+        write_metadata(directory, metadata)
+        return build_comparison_response(metadata, comparison)
+    except HTTPException:
+        shutil.rmtree(directory, ignore_errors=True)
+        raise
+    except Exception as exc:
+        metadata = {
+            "id": job_id,
+            "status": "failed",
+            "pdf_filename": pdf_name,
+            "step_filename": step_name,
+            "elapsed_seconds": round(time.perf_counter() - started, 3),
+            "error": str(exc),
+        }
+        write_metadata(directory, metadata)
+        raise HTTPException(status_code=422, detail=f"PDF/STEP 对比失败: {exc}") from exc
+    finally:
+        await pdf.close()
+        await step.close()
+
+
 @app.get("/api/v1/jobs/{job_id}", response_model=JobResponse)
 def get_job(job_id: str) -> JobResponse:
     metadata_path = job_dir(job_id) / "job.json"
@@ -229,7 +371,7 @@ def get_result_file(job_id: str, name: str) -> FileResponse:
     if name not in ALLOWED_RESULTS:
         raise HTTPException(status_code=404, detail="结果文件不存在")
     base = job_dir(job_id)
-    path = base / name if name == "analysis.json" else base / "views" / name
+    path = base / name if name in ROOT_RESULTS else base / "views" / name
     if not path.is_file():
         raise HTTPException(status_code=404, detail="结果文件不存在")
     media_type = (
@@ -250,7 +392,7 @@ def download_results(job_id: str) -> FileResponse:
     if not archive.exists():
         with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED) as output:
             for name in sorted(ALLOWED_RESULTS):
-                path = base / name if name == "analysis.json" else base / "views" / name
+                path = base / name if name in ROOT_RESULTS else base / "views" / name
                 if path.is_file():
                     output.write(path, name)
     metadata = json.loads(metadata_path.read_text(encoding="utf-8"))

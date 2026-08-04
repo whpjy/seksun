@@ -1,0 +1,185 @@
+{
+  "schema_version": "0.1.0",
+  "measurement_id": "C10",
+  "type": "hole_diameter",
+  "source": {
+    "view": "VIEW_MAIN",
+    "label": "10",
+    "anchor_pdf": [
+      242.49,
+      707.72
+    ],
+    "raw_text": "6.5 ±0.1 (6x)"
+  },
+  "expected": {
+    "quantity": 6,
+    "nominal_diameter": 6.5,
+    "lower_limit": 6.4,
+    "upper_limit": 6.6
+  },
+  "registration": {
+    "method": "rigid_2d_pattern_match",
+    "scale": 1.0,
+    "reflection": false,
+    "rms_residual_mm": 0.0,
+    "maximum_residual_mm": 0.0
+  },
+  "summary": {
+    "matched": 6,
+    "passed": 5,
+    "failed": 1
+  },
+  "result": "fail",
+  "features": [
+    {
+      "pdf_feature_id": "VG_HOLE_01",
+      "pdf_relative_center_mm": [
+        0.0,
+        0.0
+      ],
+      "step_feature_id": "step-surface-911",
+      "step_source_ids": [
+        "#911",
+        "#926"
+      ],
+      "step_center": [
+        73.0,
+        -20.0,
+        0.0
+      ],
+      "step_projected_center": [
+        73.0,
+        -20.0
+      ],
+      "actual_diameter": 6.5,
+      "deviation": 0.0,
+      "position_residual_mm": 0.0,
+      "result": "pass"
+    },
+    {
+      "pdf_feature_id": "VG_HOLE_02",
+      "pdf_relative_center_mm": [
+        41.0,
+        0.0
+      ],
+      "step_feature_id": "step-surface-1043",
+      "step_source_ids": [
+        "#1043",
+        "#1057"
+      ],
+      "step_center": [
+        32.0,
+        -20.0,
+        0.0
+      ],
+      "step_projected_center": [
+        32.0,
+        -20.0
+      ],
+      "actual_diameter": 6.5,
+      "deviation": 0.0,
+      "position_residual_mm": 0.0,
+      "result": "pass"
+    },
+    {
+      "pdf_feature_id": "VG_HOLE_03",
+      "pdf_relative_center_mm": [
+        85.0,
+        0.0
+      ],
+      "step_feature_id": "step-surface-1121",
+      "step_source_ids": [
+        "#1121",
+        "#1135"
+      ],
+      "step_center": [
+        -12.0,
+        -20.0,
+        0.0
+      ],
+      "step_projected_center": [
+        -12.0,
+        -20.0
+      ],
+      "actual_diameter": 6.5,
+      "deviation": 0.0,
+      "position_residual_mm": 0.0,
+      "result": "pass"
+    },
+    {
+      "pdf_feature_id": "VG_HOLE_04",
+      "pdf_relative_center_mm": [
+        0.0,
+        -40.0
+      ],
+      "step_feature_id": "step-surface-1069",
+      "step_source_ids": [
+        "#1069",
+        "#1083"
+      ],
+      "step_center": [
+        73.0,
+        20.0,
+        0.0
+      ],
+      "step_projected_center": [
+        73.0,
+        20.0
+      ],
+      "actual_diameter": 6.5,
+      "deviation": 0.0,
+      "position_residual_mm": 0.0,
+      "result": "pass"
+    },
+    {
+      "pdf_feature_id": "VG_HOLE_05",
+      "pdf_relative_center_mm": [
+        32.0,
+        -40.0
+      ],
+      "step_feature_id": "step-surface-1095",
+      "step_source_ids": [
+        "#1095",
+        "#1109"
+      ],
+      "step_center": [
+        41.0,
+        20.0,
+        0.0
+      ],
+      "step_projected_center": [
+        41.0,
+        20.0
+      ],
+      "actual_diameter": 6.5,
+      "deviation": 0.0,
+      "position_residual_mm": 0.0,
+      "result": "pass"
+    },
+    {
+      "pdf_feature_id": "VG_HOLE_06",
+      "pdf_relative_center_mm": [
+        85.0,
+        -40.0
+      ],
+      "step_feature_id": "step-surface-1550",
+      "step_source_ids": [
+        "#1550",
+        "#1564"
+      ],
+      "step_center": [
+        -12.0,
+        20.0,
+        3.0
+      ],
+      "step_projected_center": [
+        -12.0,
+        20.0
+      ],
+      "actual_diameter": 7.0,
+      "deviation": 0.5,
+      "position_residual_mm": 0.0,
+      "result": "fail"
+    }
+  ]
+}

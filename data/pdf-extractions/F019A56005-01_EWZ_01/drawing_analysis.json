@@ -1,0 +1,269 @@
+{
+  "schema_version": "0.1.0",
+  "source": {
+    "filename": "F019A56005-01_EWZ_01.pdf",
+    "sha256": "5B1E9FEE36D805BB765A088EA44A35E9D8C1C64385CB4153E1ABBC0C30423425",
+    "title": "f019a56005-01",
+    "subject": "Solenoid module cover",
+    "creator": "Creo Parametric 9.0",
+    "pdf_version": "1.4"
+  },
+  "document": {
+    "page_count": 1,
+    "kind": "vector",
+    "text_item_count": 376,
+    "path_operation_count": 6765,
+    "ocr_required": false
+  },
+  "page": {
+    "number": 1,
+    "width": 1196.21997,
+    "height": 847.55902,
+    "unit": "pdf_point",
+    "coordinate_system": "origin_bottom_left"
+  },
+  "detected_regions": [
+    {
+      "id": "VIEW_MAIN",
+      "type": "orthographic_view",
+      "role": "main_profile",
+      "bbox_pdf": [60, 350, 755, 760],
+      "confidence": 0.93
+    },
+    {
+      "id": "VIEW_DETAIL",
+      "type": "detail_view",
+      "role": "sealing_area_detail",
+      "bbox_pdf": [590, 270, 1010, 455],
+      "confidence": 0.78
+    },
+    {
+      "id": "TECHNICAL_REQUIREMENTS",
+      "type": "notes",
+      "bbox_pdf": [65, 100, 600, 310],
+      "confidence": 0.98
+    },
+    {
+      "id": "TITLE_BLOCK",
+      "type": "title_block",
+      "bbox_pdf": [625, 30, 1165, 260],
+      "confidence": 0.98
+    }
+  ],
+  "inspection_characteristics": [
+    {
+      "label": "10",
+      "label_origin_pdf": [242.49, 707.72],
+      "raw_text": "6.5 ±0.1 (6x)",
+      "text_origins_pdf": [[215.1, 695.33], [270.85, 695.33]],
+      "proposed_type": "hole_diameter",
+      "confidence": 0.99
+    },
+    {
+      "label": "11",
+      "label_origin_pdf": [273.5, 675.98],
+      "raw_text": "position 0.15",
+      "text_origins_pdf": [],
+      "proposed_type": "geometric_tolerance",
+      "confidence": 0.78,
+      "note": "The value and position symbol are vector glyphs and need path-level recovery or confirmation."
+    },
+    {
+      "label": "12",
+      "label_origin_pdf": [423.76, 715.96],
+      "raw_text": "16 ±0.1",
+      "text_origins_pdf": [[407.06, 703.56]],
+      "proposed_type": "linear_distance",
+      "confidence": 0.98
+    },
+    {
+      "label": "13",
+      "label_origin_pdf": [541.47, 713.15],
+      "raw_text": "R10.4",
+      "text_origins_pdf": [[531.38, 700.75]],
+      "proposed_type": "radius",
+      "confidence": 0.99
+    },
+    {
+      "label": "14",
+      "label_origin_pdf": [144.31, 629.55],
+      "raw_text": "R5 (2x)",
+      "text_origins_pdf": [[132.81, 617.16], [140.6, 617.16]],
+      "proposed_type": "radius",
+      "confidence": 0.99
+    },
+    {
+      "label": "15",
+      "label_origin_pdf": [713.27, 676.63],
+      "raw_text": "R1 (4x)",
+      "text_origins_pdf": [[713.81, 664.24], [713.81, 649.35], [721.61, 664.24]],
+      "proposed_type": "radius",
+      "confidence": 0.99
+    },
+    {
+      "label": "16",
+      "label_origin_pdf": [271.92, 590.89],
+      "raw_text": "18.64 ±0.1",
+      "text_origins_pdf": [[284.32, 563.56]],
+      "proposed_type": "linear_distance",
+      "confidence": 0.96
+    },
+    {
+      "label": "17",
+      "label_origin_pdf": [341.68, 611.97],
+      "raw_text": "R2",
+      "text_origins_pdf": [[341.51, 599.58]],
+      "proposed_type": "radius",
+      "confidence": 0.99
+    },
+    {
+      "label": "18",
+      "label_origin_pdf": [433.33, 582.28],
+      "raw_text": "15.6 ±0.1",
+      "text_origins_pdf": [[445.73, 559.2]],
+      "proposed_type": "linear_distance",
+      "confidence": 0.96
+    },
+    {
+      "label": "19",
+      "label_origin_pdf": [478.17, 617.57],
+      "raw_text": "R3 (6x)",
+      "text_origins_pdf": [[478.36, 605.18], [469.86, 590.29], [486.16, 605.18]],
+      "proposed_type": "radius",
+      "confidence": 0.99
+    },
+    {
+      "label": "20",
+      "label_origin_pdf": [548.96, 596.6],
+      "raw_text": "21.03 ±0.1",
+      "text_origins_pdf": [[561.35, 570.69]],
+      "proposed_type": "linear_distance",
+      "confidence": 0.96
+    },
+    {
+      "label": "21",
+      "label_origin_pdf": [616.03, 623.26],
+      "raw_text": "135°",
+      "text_origins_pdf": [[610.43, 610.87], [630.28, 610.87]],
+      "proposed_type": "angle",
+      "confidence": 0.98
+    },
+    {
+      "label": "22",
+      "label_origin_pdf": [694.38, 528.35],
+      "raw_text": "34.64 ±0.1",
+      "text_origins_pdf": [[706.78, 501.38]],
+      "proposed_type": "linear_distance",
+      "confidence": 0.96
+    },
+    {
+      "label": "23",
+      "label_origin_pdf": [612.92, 464.43],
+      "raw_text": "133.7°",
+      "text_origins_pdf": [[601.3, 452.04], [634.6, 452.04]],
+      "proposed_type": "angle",
+      "confidence": 0.98
+    },
+    {
+      "label": "24",
+      "label_origin_pdf": [70.74, 384.95],
+      "raw_text": "R6 (6x)",
+      "text_origins_pdf": [[71.64, 372.56], [63.84, 357.67], [79.44, 372.56]],
+      "proposed_type": "radius",
+      "confidence": 0.98
+    },
+    {
+      "label": "25",
+      "label_origin_pdf": [244.47, 374.54],
+      "raw_text": "47 ±0.1",
+      "text_origins_pdf": [[227.42, 362.15], [250.8, 362.15]],
+      "proposed_type": "linear_distance",
+      "confidence": 0.99
+    },
+    {
+      "label": "26",
+      "label_origin_pdf": [524.18, 374.54],
+      "raw_text": "51.8 ±0.1",
+      "text_origins_pdf": [[502.16, 362.15]],
+      "proposed_type": "linear_distance",
+      "confidence": 0.99
+    },
+    {
+      "label": "40",
+      "label_origin_pdf": [846.98, 738.06],
+      "raw_text": "Rzmax 10, sealing area",
+      "text_origins_pdf": [[757.17, 744.65]],
+      "proposed_type": "surface_roughness",
+      "confidence": 0.91
+    },
+    {
+      "label": "41",
+      "label_origin_pdf": [956.79, 736.8],
+      "raw_text": "3 ±0.2",
+      "text_origins_pdf": [[942.22, 724.41]],
+      "proposed_type": "thickness",
+      "confidence": 0.98
+    },
+    {
+      "label": "42",
+      "label_origin_pdf": [838.11, 577.48],
+      "raw_text": "geometric tolerance 0.1, sealing area",
+      "text_origins_pdf": [],
+      "proposed_type": "geometric_tolerance",
+      "confidence": 0.7,
+      "note": "The tolerance symbol is not represented as extractable text and must be confirmed."
+    }
+  ],
+  "other_dimension_candidates": [
+    {"raw_text": "9", "origin_pdf": [356.63, 466.42], "proposed_type": "linear_distance"},
+    {"raw_text": "41", "origin_pdf": [263.08, 400.53], "proposed_type": "linear_distance"},
+    {"raw_text": "44", "origin_pdf": [502.97, 400.53], "proposed_type": "linear_distance"},
+    {"raw_text": "41", "origin_pdf": [263.08, 734.14], "proposed_type": "linear_distance"},
+    {"raw_text": "44", "origin_pdf": [502.97, 734.87], "proposed_type": "linear_distance"},
+    {"raw_text": "20", "origin_pdf": [89.08, 594.59], "proposed_type": "linear_distance"},
+    {"raw_text": "20", "origin_pdf": [89.08, 481.2], "proposed_type": "linear_distance"},
+    {"raw_text": "R10 (3x)", "origin_pdf": [604.49, 326.3], "proposed_type": "radius"},
+    {"raw_text": "15", "origin_pdf": [925.49, 369.57], "proposed_type": "linear_distance"},
+    {"raw_text": "32", "origin_pdf": [857.81, 369.57], "proposed_type": "linear_distance"},
+    {"raw_text": "32", "origin_pdf": [767.11, 369.57], "proposed_type": "linear_distance"},
+    {"raw_text": "R4", "origin_pdf": [738.56, 286.84], "proposed_type": "radius"},
+    {"raw_text": "20", "origin_pdf": [640.8, 293.52], "proposed_type": "linear_distance"},
+    {"raw_text": "15.6", "origin_pdf": [968.65, 281.97], "proposed_type": "linear_distance"}
+  ],
+  "technical_requirements": [
+    {
+      "id": "TR03",
+      "type": "minimum_coating_thickness",
+      "material": "galvanized",
+      "value": 6,
+      "unit": "um",
+      "raw_text": "Minimum allowable thickness of galvanized 6um"
+    },
+    {
+      "id": "TR04",
+      "type": "minimum_coating_thickness",
+      "material": "electrophoretic_paint",
+      "value": 25,
+      "unit": "um",
+      "raw_text": "Minimum allowable electrophoretic paint thickness 25um."
+    },
+    {
+      "id": "TR05",
+      "type": "maximum_burr_height",
+      "value": 0.05,
+      "unit": "mm",
+      "raw_text": "Maximum allowable burrs for stamping 0.05mm."
+    },
+    {
+      "id": "TR_MISSING_TED",
+      "type": "model_reference",
+      "raw_text": "for missing TED refer to 3D data"
+    }
+  ],
+  "review_required": [
+    "Confirm the exact geometric-tolerance symbol and target for characteristic 11.",
+    "Confirm the exact geometric-tolerance symbol and target sealing faces for characteristic 42.",
+    "Associate each linear dimension with its two extension-line endpoints.",
+    "Determine whether unnumbered dimensions are comparison requirements or reference-only dimensions."
+  ]
+}

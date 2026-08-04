@@ -1,0 +1,215 @@
+{
+  "schema_version": "0.1.0",
+  "plan_id": "F019A56005-01_EWZ_01-page-1",
+  "source": {
+    "filename": "F019A56005-01_EWZ_01.pdf",
+    "page": 1,
+    "drawing_number": "F019A56005-01",
+    "revision": "01",
+    "unit": "mm"
+  },
+  "scope": {
+    "mode": "inspection_characteristics_first",
+    "included_labels": ["10", "11", "12", "13", "14", "15", "16", "17", "18", "19", "20", "21", "22", "23", "24", "25", "26", "40", "41", "42"],
+    "excluded_for_now": ["unnumbered_dimensions", "coating_requirements", "burr_requirement"]
+  },
+  "measurements": [
+    {
+      "id": "C10",
+      "type": "hole_diameter",
+      "nominal": 6.5,
+      "tolerance": {"upper": 0.1, "lower": -0.1},
+      "quantity": 6,
+      "target": {
+        "feature_type": "cylindrical_hole_group",
+        "constraints": {"diameter": 6.5, "count": 6}
+      },
+      "source": {"view": "VIEW_MAIN", "label": "10", "anchor_pdf": [242.49, 707.72], "raw_text": "6.5 ±0.1 (6x)"},
+      "extraction": {"status": "ready", "confidence": 0.99}
+    },
+    {
+      "id": "C11",
+      "type": "geometric_tolerance",
+      "subtype": "position",
+      "nominal": 0.15,
+      "target": {"measurement_ref": "C10"},
+      "source": {"view": "VIEW_MAIN", "label": "11", "anchor_pdf": [273.5, 675.98], "raw_text": "position 0.15"},
+      "extraction": {"status": "needs_confirmation", "confidence": 0.78, "reason": "symbol_not_extractable_as_text"}
+    },
+    {
+      "id": "C12",
+      "type": "linear_distance",
+      "axis_hint": "x",
+      "nominal": 16,
+      "tolerance": {"upper": 0.1, "lower": -0.1},
+      "endpoints": {"from": null, "to": null},
+      "source": {"view": "VIEW_MAIN", "label": "12", "anchor_pdf": [423.76, 715.96], "raw_text": "16 ±0.1"},
+      "extraction": {"status": "needs_endpoint_binding", "confidence": 0.98}
+    },
+    {
+      "id": "C13",
+      "type": "radius",
+      "nominal": 10.4,
+      "quantity": 1,
+      "target": {"feature_type": "circular_edge_or_cylindrical_face", "feature_ref": null},
+      "source": {"view": "VIEW_MAIN", "label": "13", "anchor_pdf": [541.47, 713.15], "raw_text": "R10.4"},
+      "extraction": {"status": "needs_feature_binding", "confidence": 0.99}
+    },
+    {
+      "id": "C14",
+      "type": "radius",
+      "nominal": 5,
+      "quantity": 2,
+      "target": {"feature_type": "circular_edge_or_cylindrical_face", "feature_ref": null},
+      "source": {"view": "VIEW_MAIN", "label": "14", "anchor_pdf": [144.31, 629.55], "raw_text": "R5 (2x)"},
+      "extraction": {"status": "needs_feature_binding", "confidence": 0.99}
+    },
+    {
+      "id": "C15",
+      "type": "radius",
+      "nominal": 1,
+      "quantity": 4,
+      "target": {"feature_type": "circular_edge_or_cylindrical_face", "feature_ref": null},
+      "source": {"view": "VIEW_MAIN", "label": "15", "anchor_pdf": [713.27, 676.63], "raw_text": "R1 (4x)"},
+      "extraction": {"status": "needs_feature_binding", "confidence": 0.99}
+    },
+    {
+      "id": "C16",
+      "type": "linear_distance",
+      "axis_hint": "y",
+      "nominal": 18.64,
+      "tolerance": {"upper": 0.1, "lower": -0.1},
+      "endpoints": {"from": null, "to": null},
+      "source": {"view": "VIEW_MAIN", "label": "16", "anchor_pdf": [271.92, 590.89], "raw_text": "18.64 ±0.1"},
+      "extraction": {"status": "needs_endpoint_binding", "confidence": 0.96}
+    },
+    {
+      "id": "C17",
+      "type": "radius",
+      "nominal": 2,
+      "quantity": 1,
+      "target": {"feature_type": "circular_edge_or_cylindrical_face", "feature_ref": null},
+      "source": {"view": "VIEW_MAIN", "label": "17", "anchor_pdf": [341.68, 611.97], "raw_text": "R2"},
+      "extraction": {"status": "needs_feature_binding", "confidence": 0.99}
+    },
+    {
+      "id": "C18",
+      "type": "linear_distance",
+      "axis_hint": "y",
+      "nominal": 15.6,
+      "tolerance": {"upper": 0.1, "lower": -0.1},
+      "endpoints": {"from": null, "to": null},
+      "source": {"view": "VIEW_MAIN", "label": "18", "anchor_pdf": [433.33, 582.28], "raw_text": "15.6 ±0.1"},
+      "extraction": {"status": "needs_endpoint_binding", "confidence": 0.96}
+    },
+    {
+      "id": "C19",
+      "type": "radius",
+      "nominal": 3,
+      "quantity": 6,
+      "target": {"feature_type": "circular_edge_or_cylindrical_face", "feature_ref": null},
+      "source": {"view": "VIEW_MAIN", "label": "19", "anchor_pdf": [478.17, 617.57], "raw_text": "R3 (6x)"},
+      "extraction": {"status": "needs_feature_binding", "confidence": 0.99}
+    },
+    {
+      "id": "C20",
+      "type": "linear_distance",
+      "axis_hint": "y",
+      "nominal": 21.03,
+      "tolerance": {"upper": 0.1, "lower": -0.1},
+      "endpoints": {"from": null, "to": null},
+      "source": {"view": "VIEW_MAIN", "label": "20", "anchor_pdf": [548.96, 596.6], "raw_text": "21.03 ±0.1"},
+      "extraction": {"status": "needs_endpoint_binding", "confidence": 0.96}
+    },
+    {
+      "id": "C21",
+      "type": "angle",
+      "nominal": 135,
+      "unit": "degree",
+      "endpoints": {"from": null, "vertex": null, "to": null},
+      "source": {"view": "VIEW_MAIN", "label": "21", "anchor_pdf": [616.03, 623.26], "raw_text": "135°"},
+      "extraction": {"status": "needs_endpoint_binding", "confidence": 0.98}
+    },
+    {
+      "id": "C22",
+      "type": "linear_distance",
+      "axis_hint": "y",
+      "nominal": 34.64,
+      "tolerance": {"upper": 0.1, "lower": -0.1},
+      "endpoints": {"from": null, "to": null},
+      "source": {"view": "VIEW_MAIN", "label": "22", "anchor_pdf": [694.38, 528.35], "raw_text": "34.64 ±0.1"},
+      "extraction": {"status": "needs_endpoint_binding", "confidence": 0.96}
+    },
+    {
+      "id": "C23",
+      "type": "angle",
+      "nominal": 133.7,
+      "unit": "degree",
+      "endpoints": {"from": null, "vertex": null, "to": null},
+      "source": {"view": "VIEW_MAIN", "label": "23", "anchor_pdf": [612.92, 464.43], "raw_text": "133.7°"},
+      "extraction": {"status": "needs_endpoint_binding", "confidence": 0.98}
+    },
+    {
+      "id": "C24",
+      "type": "radius",
+      "nominal": 6,
+      "quantity": 6,
+      "target": {"feature_type": "circular_edge_or_cylindrical_face", "feature_ref": null},
+      "source": {"view": "VIEW_MAIN", "label": "24", "anchor_pdf": [70.74, 384.95], "raw_text": "R6 (6x)"},
+      "extraction": {"status": "needs_feature_binding", "confidence": 0.98}
+    },
+    {
+      "id": "C25",
+      "type": "linear_distance",
+      "axis_hint": "x",
+      "nominal": 47,
+      "tolerance": {"upper": 0.1, "lower": -0.1},
+      "endpoints": {"from": null, "to": null},
+      "source": {"view": "VIEW_MAIN", "label": "25", "anchor_pdf": [244.47, 374.54], "raw_text": "47 ±0.1"},
+      "extraction": {"status": "needs_endpoint_binding", "confidence": 0.99}
+    },
+    {
+      "id": "C26",
+      "type": "linear_distance",
+      "axis_hint": "x",
+      "nominal": 51.8,
+      "tolerance": {"upper": 0.1, "lower": -0.1},
+      "endpoints": {"from": null, "to": null},
+      "source": {"view": "VIEW_MAIN", "label": "26", "anchor_pdf": [524.18, 374.54], "raw_text": "51.8 ±0.1"},
+      "extraction": {"status": "needs_endpoint_binding", "confidence": 0.99}
+    },
+    {
+      "id": "C40",
+      "type": "surface_roughness",
+      "parameter": "Rzmax",
+      "maximum": 10,
+      "target": {"feature_type": "sealing_area", "feature_ref": null},
+      "source": {"view": "VIEW_MAIN", "label": "40", "anchor_pdf": [846.98, 738.06], "raw_text": "Rzmax 10, sealing area"},
+      "extraction": {"status": "needs_feature_binding", "confidence": 0.91}
+    },
+    {
+      "id": "C41",
+      "type": "thickness",
+      "nominal": 3,
+      "tolerance": {"upper": 0.2, "lower": -0.2},
+      "target": {"feature_type": "opposed_planar_faces", "feature_ref": null},
+      "source": {"view": "VIEW_MAIN", "label": "41", "anchor_pdf": [956.79, 736.8], "raw_text": "3 ±0.2"},
+      "extraction": {"status": "needs_feature_binding", "confidence": 0.98}
+    },
+    {
+      "id": "C42",
+      "type": "geometric_tolerance",
+      "subtype": "unknown",
+      "nominal": 0.1,
+      "target": {"feature_type": "sealing_area", "feature_ref": null},
+      "source": {"view": "VIEW_DETAIL", "label": "42", "anchor_pdf": [838.11, 577.48], "raw_text": "geometric tolerance 0.1, sealing area"},
+      "extraction": {"status": "needs_confirmation", "confidence": 0.7, "reason": "symbol_not_extractable_as_text"}
+    }
+  ],
+  "binding_policy": {
+    "automatic_minimum_confidence": 0.95,
+    "review_minimum_confidence": 0.75,
+    "ambiguous_candidate_delta": 0.05,
+    "never_force_ambiguous_binding": true
+  }
+}

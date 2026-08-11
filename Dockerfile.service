@@ -39,7 +39,6 @@ RUN pip install --no-cache-dir -r /tmp/requirements.txt
 COPY --from=builder /opt/meas/bin/occt-analyzer /usr/local/bin/
 COPY --from=builder /opt/meas/bin/occt-projector /usr/local/bin/
 COPY service /app/service
-COPY data/pdf-extractions /app/data/pdf-extractions
 
 RUN useradd --system --uid 10001 --create-home meas \
     && mkdir -p /data/jobs \

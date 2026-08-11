@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import json
 import os
 import re
@@ -20,6 +19,7 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
 from service.comparison import compare_c10_from_analysis
+from service.pdf_extraction import extract_c10_from_pdf
 
 
 APP_VERSION = "1.0.0"
@@ -33,19 +33,22 @@ CHUNK_SIZE = 1024 * 1024
 ALLOWED_RESULTS = {
     "analysis.json",
     "comparison.json",
+    "measurement_plan.json",
+    "vector_extraction.json",
+    "pdf_extraction_diagnostics.json",
     "front.svg",
     "top.svg",
     "right.svg",
     "three_views.svg",
     "views.json",
 }
-ROOT_RESULTS = {"analysis.json", "comparison.json"}
-PDF_EXTRACTION_ROOT = Path(
-    os.getenv(
-        "MEAS_PDF_EXTRACTION_ROOT",
-        str(Path(__file__).resolve().parents[1] / "data" / "pdf-extractions"),
-    )
-).resolve()
+ROOT_RESULTS = {
+    "analysis.json",
+    "comparison.json",
+    "measurement_plan.json",
+    "vector_extraction.json",
+    "pdf_extraction_diagnostics.json",
+}
 
 job_slots = asyncio.Semaphore(MAX_CONCURRENT_JOBS)
 
@@ -77,6 +80,9 @@ class JobResponse(BaseModel):
 
 class ComparisonLinks(ResultLinks):
     comparison: str
+    measurement_plan: str
+    vector_extraction: str
+    extraction_diagnostics: str
 
 
 class ComparisonJobResponse(BaseModel):
@@ -147,6 +153,9 @@ def build_comparison_response(metadata: dict, comparison: dict) -> ComparisonJob
         results=ComparisonLinks(
             analysis=file_url(job_id, "analysis.json"),
             comparison=file_url(job_id, "comparison.json"),
+            measurement_plan=file_url(job_id, "measurement_plan.json"),
+            vector_extraction=file_url(job_id, "vector_extraction.json"),
+            extraction_diagnostics=file_url(job_id, "pdf_extraction_diagnostics.json"),
             front=file_url(job_id, "front.svg"),
             top=file_url(job_id, "top.svg"),
             right=file_url(job_id, "right.svg"),
@@ -194,30 +203,18 @@ def process_step(directory: Path, source: Path) -> None:
     run_command([PROJECTOR_BIN, str(source), str(views_dir), str(analysis_path)])
 
 
-def find_pdf_extraction(pdf_path: Path) -> Path:
-    digest = hashlib.sha256(pdf_path.read_bytes()).hexdigest().upper()
-    if not PDF_EXTRACTION_ROOT.is_dir():
-        raise RuntimeError("PDF 提取数据目录不存在")
-    for analysis_path in PDF_EXTRACTION_ROOT.glob("*/drawing_analysis.json"):
-        try:
-            drawing = json.loads(analysis_path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            continue
-        expected = str(drawing.get("source", {}).get("sha256", "")).upper()
-        if expected == digest:
-            return analysis_path.parent
-    raise RuntimeError("该 PDF 尚未生成矢量测量计划")
-
-
 def process_pdf_step_comparison(directory: Path, pdf_path: Path, step_path: Path) -> dict:
+    measurement_plan, vector_extraction, diagnostics = extract_c10_from_pdf(pdf_path)
+    for name, content in (
+        ("measurement_plan.json", measurement_plan),
+        ("vector_extraction.json", vector_extraction),
+        ("pdf_extraction_diagnostics.json", diagnostics),
+    ):
+        (directory / name).write_text(
+            json.dumps(content, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
     process_step(directory, step_path)
-    extraction = find_pdf_extraction(pdf_path)
-    measurement_plan = json.loads(
-        (extraction / "measurement_plan.json").read_text(encoding="utf-8")
-    )
-    vector_extraction = json.loads(
-        (extraction / "vector_extraction.json").read_text(encoding="utf-8")
-    )
     step_analysis = json.loads((directory / "analysis.json").read_text(encoding="utf-8"))
     comparison = compare_c10_from_analysis(
         measurement_plan,

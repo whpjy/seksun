@@ -31,7 +31,7 @@ Content-Type: multipart/form-data
 
 ## PDF / STEP 对比（首个闭环）
 
-当前已实现检验特性 `C10` 的孔组对比：系统从 PDF 矢量提取包读取孔径、公差、数量和二维孔阵列，将其与 STEP 中的逻辑圆柱特征进行旋转、镜像和平移不变的整体匹配，并逐孔输出通过/失败结果。
+当前已实现检验特性 `C10` 的孔组对比：系统直接读取原始矢量 PDF 的文本和路径内容流，自动提取孔径、公差、数量、局部视图比例和二维孔阵列，再将其与 STEP 中的逻辑圆柱特征进行旋转、镜像和平移不变的整体匹配，并逐孔输出通过/失败结果。
 
 ```text
 POST /api/v1/comparisons
@@ -39,9 +39,22 @@ Content-Type: multipart/form-data
 字段：pdf（.pdf）、step（.stp/.step）
 ```
 
-目前仓库内置 `F019A56005-01_EWZ_01.pdf` 的矢量提取包。其他 PDF 在调用对比接口前仍需生成对应的 `measurement_plan.json` 和 `vector_extraction.json`；自动生成这两个文件是下一阶段工作。
+接口会为每个任务自动生成并保存：
 
-不启动 OCCT 服务时，也可以使用依赖无关的 STEP 诊断读取器复核该案例：
+- `measurement_plan.json`：从 PDF 自动恢复的 C10 测量要求。
+- `vector_extraction.json`：视图比例、六孔矢量圆和相对中心坐标。
+- `pdf_extraction_diagnostics.json`：文本、路径和候选数量等诊断信息。
+- `comparison.json`：PDF 与 STEP 的逐孔比较结果。
+
+当前自动解析范围是原生矢量 PDF 中的“数量 × 孔径 ± 对称公差”标注，圆轮廓需由标准三次贝塞尔圆路径构成。扫描 PDF、非对称公差和其他尺寸类型将在后续阶段扩展。
+
+可以独立检查 PDF 自动提取结果：
+
+```powershell
+python -m service.pdf_extraction ..\example\F019A56005-01_EWZ_01.pdf
+```
+
+不启动 OCCT 服务时，也可以使用依赖无关的 STEP 诊断读取器复核已有测量计划：
 
 ```powershell
 python -m service.comparison `

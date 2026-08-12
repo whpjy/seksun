@@ -48,6 +48,12 @@ Content-Type: multipart/form-data
 
 当前自动解析范围是原生矢量 PDF 中的“数量 × 孔径 ± 对称公差”标注，圆轮廓需由标准三次贝塞尔圆路径构成。扫描 PDF、非对称公差和其他尺寸类型将在后续阶段扩展。
 
+当图纸不包含上述孔径模板时，智能审核接口不会再将任务标记为失败。系统会完成
+STEP精确分析和多模态观察，并进入 `requirement_discovery` 模式：从PDF文本层提取
+有位置坐标的尺寸、直径、半径、角度和参考尺寸候选，交由模型归纳，但不输出未经
+确定性绑定的合格/不合格结论。任务终态为 `needs_review`，工程师选择目标检验特性
+后，再为该标注类型建立对应的确定性解析和CAD映射适配器。
+
 可以独立检查 PDF 自动提取结果：
 
 ```powershell
@@ -87,3 +93,49 @@ Docker Desktop 未启动时会看到 `failed to connect to the docker API`，启
 ## 服务器运行
 
 原有的 `docker compose` 用法保持不变，分别进入 `occt-analyzer` 或 `occt-projector` 目录执行 README 中的命令即可。
+
+## AI 智能审核（第一阶段）
+
+服务提供异步智能审核接口：
+
+```text
+POST /api/v1/agent-runs
+Content-Type: multipart/form-data
+字段：pdf、step
+```
+
+创建任务后可通过以下接口查询状态和实时事件：
+
+```text
+GET /api/v1/agent-runs/{run_id}
+GET /api/v1/agent-runs/{run_id}/events
+GET /api/v1/agent-runs/{run_id}/stream
+```
+
+复制 `.env.example` 为 `.env` 并填写 `DASHSCOPE_API_KEY`。默认使用
+`qwen3.7-plus-2026-05-26`；当几何配准残差超过阈值或证据不完整时，
+路由到 `qwen3.8-max`。将 `AGENT_MODEL_MODE=mock` 可在不调用外部模型的
+情况下运行完整工具调用和前端事件流程。
+
+模型负责选择和解释工具操作，PDF提取、OCCT测量及确定性比较结果始终作为
+最终工程证据。`model_io.json` 保存可观察的模型输入输出用于开发调试，但不会
+保存API密钥、鉴权头或模型隐藏推理内容。
+
+智能审核会把PDF第一页和OCCT生成的前、顶、右固定投影视图转换为有界PNG，
+作为Qwen的多模态观察输入。模型还可调用 `render_spatial_view` 选择观察方向和
+画面横轴；OCCT生成精确隐藏线投影后，图片会再次返回模型，并作为探索图显示在
+前端证据链中。视觉内容用于理解图纸与视图，尺寸、公差和最终结果仍必须来自
+结构化工具。当前阶段尚不包含实体剖切、面隐藏/隔离或面ID回溯，前端会明确
+显示这一能力边界。
+
+对于不合格任务，智能体至少执行两步空间探索：先生成全局斜视图，再根据返回
+图像选择互补方向复核失败CAD特征。后续视图通过 `based_on_view_id` 记录探索链，
+并用 `focus_feature_id` 将确定性比较证据中的异常孔组标红。系统拒绝重复方向、
+不存在的焦点特征以及同一模型轮次内的批量投影，确保后续视角确实建立在上一张
+观察图之上；单次任务最多生成三个探索视图。
+
+探索产物可通过受限接口读取：
+
+```text
+GET /api/v1/agent-runs/{run_id}/artifacts/spatial/{view_id}/{file}
+```

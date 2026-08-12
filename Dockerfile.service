@@ -29,7 +29,7 @@ ENV DEBIAN_FRONTEND=noninteractive \
     MEAS_STORAGE_ROOT=/data/jobs
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
-        python3 python3-venv libocct-data-exchange-7.6t64 \
+        python3 python3-venv libcairo2 libocct-data-exchange-7.6t64 \
         libocct-modeling-algorithms-7.6t64 \
     && rm -rf /var/lib/apt/lists/*
 

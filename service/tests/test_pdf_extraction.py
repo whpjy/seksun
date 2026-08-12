@@ -131,3 +131,30 @@ def test_comparison_process_uses_raw_pdf_without_sidecar(tmp_path, monkeypatch):
         "comparison.json",
     ):
         assert (output / name).is_file()
+
+
+def test_unsupported_drawing_enters_requirement_discovery(tmp_path, monkeypatch):
+    pdf = tmp_path / "different-drawing.pdf"
+    step = tmp_path / "model.step"
+    output = tmp_path / "discovery-job"
+    output.mkdir()
+    writer = PdfWriter()
+    writer.add_blank_page(width=800, height=600)
+    with pdf.open("wb") as stream:
+        writer.write(stream)
+    step.write_bytes(b"ISO-10303-21")
+
+    def fake_process_step(directory: Path, _source: Path) -> None:
+        (directory / "analysis.json").write_text(
+            json.dumps({"axial_features": [], "hole_axis_groups": []}),
+            encoding="utf-8",
+        )
+
+    monkeypatch.setattr(main, "process_step", fake_process_step)
+    result = main.process_pdf_step_comparison(output, pdf, step)
+
+    assert result["result"] == "not_evaluated"
+    assert result["discovery"]["status"] == "needs_review"
+    plan = json.loads((output / "measurement_plan.json").read_text(encoding="utf-8"))
+    assert plan["scope"]["mode"] == "requirement_discovery"
+    assert plan["measurements"] == []

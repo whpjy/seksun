@@ -349,6 +349,106 @@ def extract_c10_from_pdf(pdf_path: Path) -> tuple[dict, dict, dict]:
     return measurement_plan, vector_extraction, diagnostics
 
 
+def discover_drawing_requirements(
+    pdf_path: Path,
+    extraction_error: str,
+) -> tuple[dict, dict, dict]:
+    """Collect bounded annotation candidates when no supported C10 template exists."""
+    graph = extract_page_graph(pdf_path)
+    texts: list[TextItem] = graph["texts"]
+    paths: list[VectorPath] = graph["paths"]
+    candidates: list[dict[str, Any]] = []
+    numeric_pattern = re.compile(r"^[<>]?[+-]?[0-9]+(?:\.[0-9]+)?(?:\s*(?:±|\+/-)\s*[0-9.]+)?$")
+    engineering_marker = re.compile(
+        r"(?:[Øø⌀±°]|\bREF\b|\bTYP\b|\bMAX\b|\bMIN\b|\bR\s*[0-9]|[0-9]\s*[xX]\s*[Øø⌀]?)",
+        re.IGNORECASE,
+    )
+    seen: set[tuple[str, int, int]] = set()
+    for item in texts:
+        value = " ".join(item.text.split())
+        if not value or len(value) > 160:
+            continue
+        if not numeric_pattern.fullmatch(value) and not engineering_marker.search(value):
+            continue
+        key = (value, round(item.x), round(item.y))
+        if key in seen:
+            continue
+        seen.add(key)
+        upper = value.upper().replace("⌀", "Ø")
+        kind = (
+            "diameter"
+            if "Ø" in upper or "ø" in value
+            else "radius"
+            if re.search(r"(?:^|\s)R\s*[0-9]", upper)
+            else "angle"
+            if "°" in value
+            else "reference"
+            if "REF" in upper
+            else "linear_dimension_candidate"
+        )
+        candidates.append(
+            {
+                "id": f"REQ_CANDIDATE_{len(candidates) + 1:03d}",
+                "raw_text": value,
+                "kind": kind,
+                "anchor_pdf": [round(item.x, 3), round(item.y, 3)],
+                "status": "unbound",
+            }
+        )
+        if len(candidates) >= 250:
+            break
+
+    source = {
+        "filename": pdf_path.name,
+        "page": 1,
+        "unit": "mm",
+        "extraction_method": "pypdf_requirement_candidate_discovery",
+    }
+    measurement_plan = {
+        "schema_version": "0.3.0",
+        "plan_id": f"{pdf_path.stem}-page-1-discovery",
+        "source": source,
+        "scope": {
+            "mode": "requirement_discovery",
+            "included_labels": [],
+            "status": "needs_review",
+        },
+        "measurements": [],
+        "requirement_candidates": candidates,
+        "extraction": {
+            "status": "needs_review",
+            "reason": "supported_c10_pattern_not_found",
+            "detail": extraction_error,
+        },
+    }
+    vector_extraction = {
+        "schema_version": "0.3.0",
+        "source": {"filename": pdf_path.name, "page": 1},
+        "extraction_method": "pypdf_content_stream_discovery",
+        "page": {
+            "width": graph["width"],
+            "height": graph["height"],
+            "unit": "pdf_point",
+            "coordinate_system": "origin_bottom_left",
+        },
+        "view_calibration": None,
+        "vector_features": [],
+        "annotation_bindings": [],
+        "annotation_candidates": candidates,
+    }
+    diagnostics = {
+        "schema_version": "0.2.0",
+        "source_file": pdf_path.name,
+        "page_count": graph["page_count"],
+        "text_item_count": len(texts),
+        "painted_path_count": len(paths),
+        "requirement_candidate_count": len(candidates),
+        "mode": "requirement_discovery",
+        "fallback_reason": extraction_error,
+    }
+    return measurement_plan, vector_extraction, diagnostics
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Extract characteristic C10 from a vector PDF")
     parser.add_argument("pdf", type=Path)

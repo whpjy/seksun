@@ -20,10 +20,12 @@
 #include <gp_Circ.hxx>
 #include <gp_Dir.hxx>
 #include <gp_Pnt.hxx>
+#include <gp_Vec.hxx>
 #include <nlohmann/json.hpp>
 
 #include <algorithm>
 #include <array>
+#include <cctype>
 #include <cmath>
 #include <filesystem>
 #include <fstream>
@@ -531,6 +533,50 @@ AnalysisData readAnalysis(const fs::path& path, const fs::path& stepPath) {
         }
     }
     return result;
+}
+
+bool validViewId(const std::string& value) {
+    return !value.empty() && value.size() <= 64 &&
+           std::all_of(value.begin(), value.end(), [](unsigned char character) {
+               return std::isalnum(character) || character == '_' || character == '-';
+           });
+}
+
+std::vector<ViewDefinition> readViewDefinitions(const fs::path& path) {
+    std::ifstream input(path);
+    if (!input) {
+        throw std::runtime_error("Cannot read view definitions JSON: " + path.string());
+    }
+    nlohmann::json json;
+    input >> json;
+    if (!json.contains("views") || !json.at("views").is_array() ||
+        json.at("views").empty() || json.at("views").size() > 12) {
+        throw std::runtime_error("View definitions must contain 1 to 12 views");
+    }
+
+    std::vector<ViewDefinition> definitions;
+    for (const nlohmann::json& item : json.at("views")) {
+        const std::string id = item.at("id").get<std::string>();
+        if (!validViewId(id)) {
+            throw std::runtime_error("Unsafe custom view id: " + id);
+        }
+        const Point3 directionValue = readPoint3(
+            item.at("direction"), "views.direction");
+        const Point3 xValue = readPoint3(
+            item.at("x_direction"), "views.x_direction");
+        const gp_Dir direction(
+            directionValue.x, directionValue.y, directionValue.z);
+        const gp_Dir requestedX(xValue.x, xValue.y, xValue.z);
+        gp_Vec adjustedX(requestedX);
+        adjustedX -= gp_Vec(direction) * requestedX.Dot(direction);
+        if (adjustedX.Magnitude() <= kEpsilon) {
+            throw std::runtime_error(
+                "View x_direction must not be parallel to direction: " + id);
+        }
+        const std::string title = item.value("title", id);
+        definitions.push_back({id, title, direction, gp_Dir(adjustedX)});
+    }
+    return definitions;
 }
 
 TopoDS_Shape readStep(const fs::path& path) {
@@ -2825,12 +2871,20 @@ void writeManifest(const fs::path& path,
     }
 
     const ViewResult* primary = selectPrimaryView(views);
+    const bool standardThreeViews = views.size() == 3 &&
+        views[0].definition.id == "front" &&
+        views[1].definition.id == "top" &&
+        views[2].definition.id == "right";
     output << "{\n"
            << "  \"schema_version\": \"0.26.0\",\n"
            << "  \"source_file\": \"" << source.filename().string() << "\",\n"
            << "  \"units\": \"mm\",\n"
-           << "  \"projection_method\": \"FIRST_ANGLE\",\n"
-           << "  \"combined_view\": \"three_views.svg\",\n";
+           << "  \"projection_method\": \""
+           << (standardThreeViews ? "FIRST_ANGLE" : "ORTHOGRAPHIC_CUSTOM")
+           << "\",\n"
+           << "  \"combined_view\": "
+           << (standardThreeViews ? "\"three_views.svg\"" : "null")
+           << ",\n";
     output << "  \"primary_view\": \""
            << (primary == nullptr ? std::string() : primary->definition.id)
            << "\",\n";
@@ -2868,6 +2922,14 @@ void writeManifest(const fs::path& path,
         const ViewResult& view = views[i];
         output << "    {\"id\": \"" << view.definition.id
                << "\", \"file\": \"" << view.definition.id << ".svg\""
+               << ", \"direction\": ["
+               << number(view.definition.direction.X()) << ", "
+               << number(view.definition.direction.Y()) << ", "
+               << number(view.definition.direction.Z()) << "]"
+               << ", \"x_direction\": ["
+               << number(view.definition.xDirection.X()) << ", "
+               << number(view.definition.xDirection.Y()) << ", "
+               << number(view.definition.xDirection.Z()) << "]"
                << ", \"primary\": "
                << ((primary != nullptr && primary == &view) ? "true" : "false")
                << ", \"projected_area\": "
@@ -2924,9 +2986,9 @@ void writeManifest(const fs::path& path,
 } // namespace
 
 int main(int argc, char** argv) {
-    if (argc != 3 && argc != 4) {
+    if (argc < 3 || argc > 5) {
         std::cerr << "Usage: occt-projector <input.step> <output-directory> "
-                  << "[analyzer.json]\n";
+                  << "[analyzer.json|-] [view-definitions.json]\n";
         return 2;
     }
 
@@ -2937,7 +2999,7 @@ int main(int argc, char** argv) {
 
         AnalysisData analysis;
         const AnalysisData* analysisPointer = nullptr;
-        if (argc == 4) {
+        if (argc >= 4 && std::string(argv[3]) != "-") {
             analysis = readAnalysis(fs::path(argv[3]), inputPath);
             analysisPointer = &analysis;
             std::cout << "Analyzer data: groups=" << analysis.holeGroups.size()
@@ -2956,11 +3018,14 @@ int main(int argc, char** argv) {
         }
 
         const TopoDS_Shape shape = readStep(inputPath);
-        const std::vector<ViewDefinition> definitions = {
+        std::vector<ViewDefinition> definitions = {
             {"front", "Front view (-Y)", gp_Dir(0.0, -1.0, 0.0), gp_Dir(1.0, 0.0, 0.0)},
             {"top", "Top view (+Z)", gp_Dir(0.0, 0.0, 1.0), gp_Dir(1.0, 0.0, 0.0)},
             {"right", "Right view (-X)", gp_Dir(-1.0, 0.0, 0.0), gp_Dir(0.0, -1.0, 0.0)}
         };
+        if (argc == 5) {
+            definitions = readViewDefinitions(fs::path(argv[4]));
+        }
 
         std::vector<ViewResult> views;
         views.reserve(definitions.size());
@@ -2985,11 +3050,17 @@ int main(int argc, char** argv) {
                 outputDirectory / (view.definition.id + ".svg"),
                 view);
         }
-        writeFirstAngleSheet(
-            outputDirectory / "three_views.svg",
-            views[0],
-            views[1],
-            views[2]);
+        const bool standardThreeViews = views.size() == 3 &&
+            views[0].definition.id == "front" &&
+            views[1].definition.id == "top" &&
+            views[2].definition.id == "right";
+        if (standardThreeViews) {
+            writeFirstAngleSheet(
+                outputDirectory / "three_views.svg",
+                views[0],
+                views[1],
+                views[2]);
+        }
         writeManifest(
             outputDirectory / "views.json",
             inputPath,
@@ -3017,7 +3088,9 @@ int main(int argc, char** argv) {
                       << " size=" << number(view.bounds.width())
                       << " x " << number(view.bounds.height()) << " mm\n";
         }
-        std::cout << "  combined: three_views.svg (FIRST_ANGLE)\n";
+        if (standardThreeViews) {
+            std::cout << "  combined: three_views.svg (FIRST_ANGLE)\n";
+        }
         const ViewResult* primary = selectPrimaryView(views);
         std::cout << "  primary view: "
                   << (primary == nullptr ? "NONE" : primary->definition.id)

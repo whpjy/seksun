@@ -28,6 +28,32 @@
 
 孔径和孔位语义来自同级 `occt-analyzer` 生成的 JSON。投影器会校验 JSON 的 `source_file` 与 STEP 文件名一致，防止关联错误。第三个命令行参数可以省略；省略时仍可生成不带孔语义的基础三视图。
 
+## 任意方向正交投影
+
+第四个命令行参数可传入自定义视图 JSON。此时投影器按给定观察方向和画面横轴
+生成独立 SVG，供智能体探索模型空间：
+
+```bash
+occt-projector input.step output analysis.json view-definitions.json
+```
+
+```json
+{
+  "views": [
+    {
+      "id": "explore_01",
+      "title": "explore_01",
+      "direction": [1, -1, 1],
+      "x_direction": [1, 1, 0]
+    }
+  ]
+}
+```
+
+方向向量无需预先归一化，但两向量不能为零或互相平行。自定义模式最多接受
+12个视图，`views.json` 的投影方法为 `ORTHOGRAPHIC_CUSTOM`，且不生成
+`three_views.svg`。
+
 板厚和弯曲半径标注带有 `(REF)`，表示来自几何分析的参考尺寸。半径引线只有在分析器半径与投影可见圆弧同时匹配时才输出；无法建立空间关联时自动退回半径汇总说明。歧义半径对、未识别厚度和已被分析器排除的厚度不会输出。普通 STEP 通常不包含设计公差、基准体系、材料、螺纹和加工说明。本工具生成的是自动测量参考图；生产图仍需工程师补充或审核这些信息。
 
 ## Docker 运行

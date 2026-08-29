@@ -23,6 +23,7 @@ from service.agent.events import AgentRunStore, TERMINAL_STATUSES
 from service.agent.runtime import run_model_review
 from service.agent.vision import prepare_visual_observations
 from service.comparison import compare_c10_from_analysis
+from service.correspondence import build_manufacturing_specification
 from service.pdf_extraction import discover_drawing_requirements, extract_c10_from_pdf
 
 
@@ -50,6 +51,8 @@ ALLOWED_RESULTS = {
     "agent_run.json",
     "agent_events.jsonl",
     "model_io.json",
+    "manufacturing_specification.json",
+    "model.stl",
 }
 ROOT_RESULTS = {
     "analysis.json",
@@ -60,6 +63,8 @@ ROOT_RESULTS = {
     "agent_run.json",
     "agent_events.jsonl",
     "model_io.json",
+    "manufacturing_specification.json",
+    "model.stl",
 }
 
 job_slots = asyncio.Semaphore(MAX_CONCURRENT_JOBS)
@@ -79,6 +84,8 @@ class ResultLinks(BaseModel):
     right: str
     three_views: str
     manifest: str
+    model: str
+    manufacturing_specification: str
     archive: str
 
 
@@ -153,6 +160,8 @@ def build_response(metadata: dict) -> JobResponse:
             right=file_url(job_id, "right.svg"),
             three_views=file_url(job_id, "three_views.svg"),
             manifest=file_url(job_id, "views.json"),
+            model=file_url(job_id, "model.stl"),
+            manufacturing_specification=file_url(job_id, "manufacturing_specification.json"),
             archive=f"/api/v1/jobs/{job_id}/download",
         ),
     )
@@ -174,6 +183,8 @@ def build_comparison_response(metadata: dict, comparison: dict) -> ComparisonJob
             right=file_url(job_id, "right.svg"),
             three_views=file_url(job_id, "three_views.svg"),
             manifest=file_url(job_id, "views.json"),
+            model=file_url(job_id, "model.stl"),
+            manufacturing_specification=file_url(job_id, "manufacturing_specification.json"),
             archive=f"/api/v1/jobs/{job_id}/download",
         ),
     )
@@ -210,9 +221,10 @@ def run_command(arguments: list[str]) -> None:
 
 def process_step(directory: Path, source: Path) -> None:
     analysis_path = directory / "analysis.json"
+    model_path = directory / "model.stl"
     views_dir = directory / "views"
     views_dir.mkdir()
-    run_command([ANALYZER_BIN, str(source), str(analysis_path)])
+    run_command([ANALYZER_BIN, str(source), str(analysis_path), str(model_path)])
     run_command([PROJECTOR_BIN, str(source), str(views_dir), str(analysis_path)])
 
 
@@ -261,6 +273,20 @@ def process_pdf_step_comparison(directory: Path, pdf_path: Path, step_path: Path
             vector_extraction,
             step_analysis,
         )
+    specification = build_manufacturing_specification(
+        measurement_plan,
+        step_analysis,
+        comparison,
+    )
+    comparison["manufacturing_specification"] = specification
+    comparison["drawing_entities"] = specification["drawing_entities"]
+    comparison["cad_features"] = specification["cad_features"]
+    comparison["mappings"] = specification["mappings"]
+    comparison["comparison_rows"] = specification["comparison_rows"]
+    (directory / "manufacturing_specification.json").write_text(
+        json.dumps(specification, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
     (directory / "comparison.json").write_text(
         json.dumps(comparison, ensure_ascii=False, indent=2),
         encoding="utf-8",
@@ -281,6 +307,8 @@ def agent_result_links(job_id: str) -> dict:
         "three_views": file_url(job_id, "three_views.svg"),
         "manifest": file_url(job_id, "views.json"),
         "model_io": file_url(job_id, "model_io.json"),
+        "model": file_url(job_id, "model.stl"),
+        "manufacturing_specification": file_url(job_id, "manufacturing_specification.json"),
         "archive": f"/api/v1/jobs/{job_id}/download",
     }
 
@@ -653,6 +681,8 @@ def get_result_file(job_id: str, name: str) -> FileResponse:
         if path.suffix == ".svg"
         else "application/x-ndjson"
         if path.suffix == ".jsonl"
+        else "model/stl"
+        if path.suffix == ".stl"
         else "application/json"
     )
     return FileResponse(path, media_type=media_type, filename=None)

@@ -19,6 +19,7 @@ class TextItem:
     text: str
     x: float
     y: float
+    font_size: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -72,13 +73,13 @@ def extract_page_graph(pdf_path: Path, page_number: int = 1) -> dict:
         current_matrix: list[float],
         text_matrix: list[float],
         _font: dict | None,
-        _font_size: float,
+        font_size: float,
     ) -> None:
         normalized = " ".join(value.split())
         if not normalized:
             return
         x, y = _text_origin(text_matrix, current_matrix)
-        texts.append(TextItem(normalized, x, y))
+        texts.append(TextItem(normalized, x, y, float(font_size or 0.0)))
 
     def visit_operator(
         operator: bytes,
@@ -152,6 +153,241 @@ def _parse_hole_callout(text: str) -> tuple[int, float, float] | None:
     return None
 
 
+def _parse_number(value: str | None) -> float | None:
+    if value is None:
+        return None
+    try:
+        return float(value.replace(",", "."))
+    except ValueError:
+        return None
+
+
+def _parse_annotation(text: str) -> dict[str, Any] | None:
+    """Parse one first-page text object into a conservative engineering entity.
+
+    The parser deliberately preserves unsupported annotations instead of inventing a
+    CAD binding.  It is the deterministic semantic-enrichment stage used before the
+    correspondence scorer; later adapters can add GD&T and leader-line context.
+    """
+
+    raw = " ".join(text.split()).strip()
+    compact = re.sub(r"\s+", "", raw).replace("⌀", "Ø").replace("ø", "Ø")
+    if not compact or len(compact) > 96:
+        return None
+
+    surface = re.search(r"Rz\s*max\s*([0-9]+(?:[.,][0-9]+)?)", raw, re.IGNORECASE)
+    if surface:
+        return {
+            "semantic_type": "surface_roughness",
+            "nominal": _parse_number(surface.group(1)),
+            "unit": "um",
+            "quantity": 1,
+            "target_feature_type": "surface",
+            "confidence": 0.96,
+        }
+
+    angle = re.fullmatch(r"([0-9]+(?:[.,][0-9]+)?)°", compact)
+    if angle:
+        return {
+            "semantic_type": "angle",
+            "nominal": _parse_number(angle.group(1)),
+            "unit": "deg",
+            "quantity": 1,
+            "target_feature_type": "angular_geometry",
+            "confidence": 0.98,
+        }
+
+    radius = re.fullmatch(
+        r"R(?:\((\d+)[xX]\))?([0-9]+(?:[.,][0-9]+)?)(?:±|\+/-)?([0-9]+(?:[.,][0-9]+)?)?",
+        compact,
+        re.IGNORECASE,
+    )
+    if radius:
+        tolerance = _parse_number(radius.group(3))
+        return {
+            "semantic_type": "radius",
+            "nominal": _parse_number(radius.group(2)),
+            "unit": "mm",
+            "quantity": int(radius.group(1) or 1),
+            "tolerance": {"upper": tolerance, "lower": -tolerance}
+            if tolerance is not None
+            else None,
+            "target_feature_type": "fillet_or_round",
+            "confidence": 0.98,
+        }
+
+    dimension = re.fullmatch(
+        r"(?:\((\d+)[xX]\)|(\d+)[xX])?([Ø]?)([0-9]+(?:[.,][0-9]+)?)"
+        r"(?:(?:±|\+/-)([0-9]+(?:[.,][0-9]+)?))?",
+        compact,
+        re.IGNORECASE,
+    )
+    if not dimension:
+        return None
+
+    quantity = int(dimension.group(1) or dimension.group(2) or 1)
+    has_diameter_symbol = bool(dimension.group(3))
+    tolerance = _parse_number(dimension.group(5))
+    # A repeated, toleranced callout without an explicit symbol is treated as a hole
+    # diameter candidate.  This covers common Bosch-style "(6x)6.5 +/-0.1" drawings
+    # while keeping plain integers conservative.
+    inferred_diameter = quantity > 1 and tolerance is not None
+    semantic_type = "diameter" if has_diameter_symbol or inferred_diameter else "linear_dimension"
+    confidence = 0.99 if has_diameter_symbol else 0.94 if inferred_diameter else 0.78
+    return {
+        "semantic_type": semantic_type,
+        "nominal": _parse_number(dimension.group(4)),
+        "unit": "mm",
+        "quantity": quantity,
+        "tolerance": {"upper": tolerance, "lower": -tolerance}
+        if tolerance is not None
+        else None,
+        "target_feature_type": "cylindrical_hole" if semantic_type == "diameter" else "linear_geometry",
+        "confidence": confidence,
+        "diameter_symbol_present": has_diameter_symbol,
+    }
+
+
+def extract_drawing_entities(pdf_path: Path, page_number: int = 1) -> tuple[list[dict], dict]:
+    """Extract all bounded, measurable annotation candidates from one PDF page."""
+
+    graph = extract_page_graph(pdf_path, page_number)
+    entities: list[dict[str, Any]] = []
+    page_width = float(graph["width"])
+    page_height = float(graph["height"])
+
+    def is_inspection_label(item: TextItem) -> bool:
+        """Detect the small boxed inspection indices used by the sample drawings."""
+
+        return any(
+            12.0 <= path.width <= 30.0
+            and path.height <= 0.8
+            and item.x - 15.0 <= path.bounds[0] <= item.x + 1.5
+            and item.y - 4.0 <= path.bounds[1] <= item.y + 0.5
+            for path in graph["paths"]
+        )
+
+    source_items: list[TextItem] = []
+    consumed: set[int] = set()
+    texts: list[TextItem] = graph["texts"]
+
+    # Some authoring tools emit a radius callout as three independent text objects
+    # ("R", "(6x)", "6").  Reassemble those objects before semantic parsing.
+    for index, item in enumerate(texts):
+        if item.text.strip().upper() != "R":
+            continue
+        number_match = min(
+            (
+                (other_index, other)
+                for other_index, other in enumerate(texts)
+                if other_index != index
+                and re.fullmatch(r"\d+(?:[.,]\d+)?", other.text.strip())
+                and abs(other.y - item.y) <= 4.0
+                and 0.0 < other.x - item.x <= 22.0
+            ),
+            key=lambda pair: pair[1].x - item.x,
+            default=None,
+        )
+        if number_match is None:
+            continue
+        quantity_match = min(
+            (
+                (other_index, other)
+                for other_index, other in enumerate(texts)
+                if re.fullmatch(r"\(\d+[xX]\)", other.text.strip())
+                and abs(other.x - item.x) <= 18.0
+                and 0.0 < item.y - other.y <= 24.0
+            ),
+            key=lambda pair: item.y - pair[1].y,
+            default=None,
+        )
+        number_index, number_item = number_match
+        quantity = f" {quantity_match[1].text.strip()}" if quantity_match else ""
+        source_items.append(
+            TextItem(
+                text=f"R{quantity}{number_item.text.strip()}",
+                x=item.x,
+                y=item.y,
+                font_size=max(item.font_size, number_item.font_size),
+            )
+        )
+        consumed.update({index, number_index})
+        if quantity_match:
+            consumed.add(quantity_match[0])
+
+    for index, item in enumerate(texts):
+        if index in consumed:
+            continue
+        raw = " ".join(item.text.split()).strip()
+        integer_tokens = re.fullmatch(r"\d+(?:\s+\d+)+", raw)
+        if integer_tokens:
+            values = raw.split()
+            # Two dimensions can share one PDF text object. Inspection-index groups
+            # have a characteristic surrounding box and must not become dimensions.
+            if len(values) == 2 and not is_inspection_label(item):
+                for offset, value in enumerate(values):
+                    source_items.append(
+                        TextItem(
+                            text=value,
+                            x=item.x + offset * 14.0,
+                            y=item.y,
+                            font_size=item.font_size,
+                        )
+                    )
+            continue
+        source_items.append(item)
+
+    inspection_label_count = 0
+    for item in source_items:
+        raw = " ".join(item.text.split()).strip()
+        if re.fullmatch(r"\d{1,3}", raw) and is_inspection_label(item):
+            inspection_label_count += 1
+            continue
+        # Long, tolerance-free integers are overwhelmingly title-block metadata.
+        if re.fullmatch(r"\d{4,}", raw):
+            continue
+        parsed = _parse_annotation(item.text)
+        if parsed is None:
+            continue
+        # Exclude obvious border/title-block tokens.  Ambiguous drawing-area integers
+        # are retained with lower confidence so the UI still lists them for review.
+        if item.x < 55 or item.y < max(80.0, page_height * 0.08):
+            continue
+        if item.x > page_width * 0.82 and item.y < page_height * 0.58:
+            continue
+        text_width = max(item.font_size * 0.55 * len(item.text), 8.0)
+        text_height = max(item.font_size, 8.0)
+        entity = {
+            "id": f"D2-{len(entities) + 1:03d}",
+            "page": page_number,
+            "raw_text": item.text,
+            "anchor_pdf": [round(item.x, 3), round(item.y, 3)],
+            "bbox_pdf": [
+                round(item.x, 3),
+                round(item.y - text_height * 0.25, 3),
+                round(item.x + text_width, 3),
+                round(item.y + text_height, 3),
+            ],
+            "view_id": "PAGE_1_UNASSIGNED",
+            "status": "unbound",
+            "source_method": "pypdf_text_object",
+            **parsed,
+        }
+        entities.append(entity)
+
+    diagnostics = {
+        "page": page_number,
+        "text_object_count": len(graph["texts"]),
+        "entity_count": len(entities),
+        "inspection_label_count": inspection_label_count,
+        "semantic_type_counts": {
+            kind: sum(item["semantic_type"] == kind for item in entities)
+            for kind in sorted({item["semantic_type"] for item in entities})
+        },
+    }
+    return entities, diagnostics
+
+
 def _nearest_inspection_label(callout: TextItem, texts: list[TextItem]) -> TextItem | None:
     labels = [item for item in texts if re.fullmatch(r"\d{1,3}", item.text)]
     if not labels:
@@ -209,6 +445,7 @@ def _ordered_centers(paths: list[VectorPath], row_tolerance: float) -> list[tupl
 
 def extract_c10_from_pdf(pdf_path: Path) -> tuple[dict, dict, dict]:
     graph = extract_page_graph(pdf_path)
+    drawing_entities, entity_diagnostics = extract_drawing_entities(pdf_path)
     texts: list[TextItem] = graph["texts"]
     paths: list[VectorPath] = graph["paths"]
     callout_candidates = [
@@ -256,6 +493,17 @@ def extract_c10_from_pdf(pdf_path: Path) -> tuple[dict, dict, dict]:
     label_value = label.text if label else "10"
     label_anchor = label if label else callout
     normalized_callout = f"{nominal:g} ±{symmetric_tolerance:g} ({quantity}x)"
+    source_entity = min(
+        (
+            entity
+            for entity in drawing_entities
+            if entity.get("semantic_type") == "diameter"
+            and entity.get("quantity") == quantity
+            and abs(float(entity.get("nominal", -1)) - nominal) <= 1e-6
+        ),
+        key=lambda entity: math.dist(entity["anchor_pdf"], [callout.x, callout.y]),
+        default=None,
+    )
     measurement_plan = {
         "schema_version": "0.2.0",
         "plan_id": f"{pdf_path.stem}-page-1-auto",
@@ -280,12 +528,14 @@ def extract_c10_from_pdf(pdf_path: Path) -> tuple[dict, dict, dict]:
                 "source": {
                     "view": "VIEW_MAIN",
                     "label": label_value,
+                    "drawing_entity_id": source_entity["id"] if source_entity else None,
                     "anchor_pdf": [round(label_anchor.x, 6), round(label_anchor.y, 6)],
                     "raw_text": normalized_callout,
                 },
                 "extraction": {"status": "ready", "confidence": 0.98},
             }
         ],
+        "drawing_entities": drawing_entities,
     }
     vector_extraction = {
         "schema_version": "0.2.0",
@@ -318,6 +568,7 @@ def extract_c10_from_pdf(pdf_path: Path) -> tuple[dict, dict, dict]:
         "annotation_bindings": [
             {
                 "measurement_id": "C10",
+                "drawing_entity_id": source_entity["id"] if source_entity else None,
                 "raw_text": normalized_callout,
                 "type": "hole_diameter",
                 "target_feature_id": "VG_HOLE_GROUP_01",
@@ -343,6 +594,7 @@ def extract_c10_from_pdf(pdf_path: Path) -> tuple[dict, dict, dict]:
         "painted_path_count": len(paths),
         "hole_callout_candidates": len(callout_candidates),
         "matched_circle_count": len(circles),
+        "drawing_entity_extraction": entity_diagnostics,
         "selected_callout_text": callout.text,
         "selected_scale_text": scale_item.text,
     }
@@ -355,6 +607,7 @@ def discover_drawing_requirements(
 ) -> tuple[dict, dict, dict]:
     """Collect bounded annotation candidates when no supported C10 template exists."""
     graph = extract_page_graph(pdf_path)
+    drawing_entities, entity_diagnostics = extract_drawing_entities(pdf_path)
     texts: list[TextItem] = graph["texts"]
     paths: list[VectorPath] = graph["paths"]
     candidates: list[dict[str, Any]] = []
@@ -414,6 +667,7 @@ def discover_drawing_requirements(
             "status": "needs_review",
         },
         "measurements": [],
+        "drawing_entities": drawing_entities,
         "requirement_candidates": candidates,
         "extraction": {
             "status": "needs_review",
@@ -435,6 +689,7 @@ def discover_drawing_requirements(
         "vector_features": [],
         "annotation_bindings": [],
         "annotation_candidates": candidates,
+        "drawing_entities": drawing_entities,
     }
     diagnostics = {
         "schema_version": "0.2.0",
@@ -445,6 +700,7 @@ def discover_drawing_requirements(
         "requirement_candidate_count": len(candidates),
         "mode": "requirement_discovery",
         "fallback_reason": extraction_error,
+        "drawing_entity_extraction": entity_diagnostics,
     }
     return measurement_plan, vector_extraction, diagnostics
 

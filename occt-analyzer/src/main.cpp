@@ -3,12 +3,14 @@
 #include <BRepAdaptor_Surface.hxx>
 #include <BRepBndLib.hxx>
 #include <BRepGProp.hxx>
+#include <BRepMesh_IncrementalMesh.hxx>
 #include <BRepTools.hxx>
 #include <GeomAbs_SurfaceType.hxx>
 #include <GProp_GProps.hxx>
 #include <IFSelect_ReturnStatus.hxx>
 #include <Interface_Static.hxx>
 #include <STEPControl_Reader.hxx>
+#include <StlAPI_Writer.hxx>
 #include <TopAbs_Orientation.hxx>
 #include <TopAbs_ShapeEnum.hxx>
 #include <TopExp.hxx>
@@ -2270,14 +2272,15 @@ void write_text(const fs::path& output, const std::string& content) {
 }  // namespace
 
 int main(int argc, char* argv[]) {
-    if (argc < 2 || argc > 3) {
-        std::cerr << "Usage: occt-analyzer <input.step> [output.json]\n";
+    if (argc < 2 || argc > 4) {
+        std::cerr << "Usage: occt-analyzer <input.step> [output.json] [output.stl]\n";
         return 2;
     }
 
     try {
         const fs::path input = argv[1];
-        const fs::path output = argc == 3 ? fs::path(argv[2]) : fs::path();
+        const fs::path output = argc >= 3 ? fs::path(argv[2]) : fs::path();
+        const fs::path mesh_output = argc == 4 ? fs::path(argv[3]) : fs::path();
 
         if (!fs::is_regular_file(input)) {
             throw std::runtime_error("Input STEP file does not exist: " + input.string());
@@ -2299,6 +2302,20 @@ int main(int argc, char* argv[]) {
         const TopoDS_Shape shape = reader.OneShape();
         if (shape.IsNull()) {
             throw std::runtime_error("STEP transfer produced an empty shape");
+        }
+
+        if (!mesh_output.empty()) {
+            const fs::path parent = mesh_output.parent_path();
+            if (!parent.empty()) fs::create_directories(parent);
+            BRepMesh_IncrementalMesh mesh(shape, 0.15, false, 0.35, true);
+            mesh.Perform();
+            if (!mesh.IsDone()) {
+                throw std::runtime_error("Cannot triangulate STEP model for STL export");
+            }
+            StlAPI_Writer writer;
+            if (!writer.Write(shape, mesh_output.string().c_str())) {
+                throw std::runtime_error("Cannot write STL model: " + mesh_output.string());
+            }
         }
 
         Counts counts;

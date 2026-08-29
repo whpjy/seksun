@@ -383,6 +383,7 @@ def compare_c10(
                 "step_feature_id": feature.id,
                 "step_source_ids": feature.source_ids,
                 "step_center": list(feature.center),
+                "step_axis": list(feature.axis),
                 "step_projected_center": list(projected),
                 "actual_diameter": round(feature.diameter, 6),
                 "deviation": round(feature.diameter - nominal, 6),

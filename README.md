@@ -1,5 +1,17 @@
 # seksun-meas
 
+## 第一页最小化 2D/3D 对应实现
+
+当前版本以 `example` 中的 `F019A56005-01` 为典型样本，只解析 PDF 第一页。处理链先将文本对象结构化为线性尺寸、孔径、半径、角度和粗糙度标注，再使用“类型 0.4 + 尺寸 0.4 + 上下文 0.2”的确定性评分生成 2D/CAD 候选对应。分数接近的候选会保留为 `ambiguous`，不会被强制绑定。
+
+每个 PDF/STEP 对比任务新增产物：
+
+- `manufacturing_specification.json`：全部第一页 2D 标注、CAD 特征、评分、候选对应和溯源信息。
+- `model.stl`：由 OCCT 对 STEP 网格化导出，供前端 Three.js 交互显示。
+- `comparison.json.comparison_rows`：前端列表所需的逐标注期望值、测量值、状态与 CAD 特征 ID。
+
+最小实现中，`C10` 六孔组已执行刚性阵列配准和逐孔尺寸检验；尚未有确定性 CAD 适配器的线性尺寸、圆角、角度和粗糙度会明确标记为 `unmapped` 或 `ambiguous`，供后续人工复核。
+
 本项目包含两个 Open CASCADE 工具：
 
 - `occt-analyzer`：读取 STEP 并生成特征分析 JSON；

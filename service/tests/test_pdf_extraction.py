@@ -6,7 +6,11 @@ from pypdf import PdfWriter
 from pypdf.generic import DecodedStreamObject, DictionaryObject, NameObject
 
 from service import main
-from service.pdf_extraction import PDF_POINTS_PER_MM, extract_c10_from_pdf
+from service.pdf_extraction import (
+    PDF_POINTS_PER_MM,
+    extract_c10_from_pdf,
+    extract_drawing_entities,
+)
 
 
 def _circle_commands(center_x: float, center_y: float, radius: float) -> str:
@@ -81,6 +85,12 @@ def test_extracts_c10_from_raw_vector_pdf(tmp_path):
     for actual, expected in zip(relative_centers, expected_centers):
         assert actual == pytest.approx(expected, abs=1e-5)
     assert diagnostics["matched_circle_count"] == 6
+    entities, entity_diagnostics = extract_drawing_entities(pdf)
+    repeated_hole = next(item for item in entities if item["semantic_type"] == "diameter")
+    assert repeated_hole["nominal"] == 6.5
+    assert repeated_hole["quantity"] == 6
+    assert repeated_hole["tolerance"] == {"upper": 0.1, "lower": -0.1}
+    assert entity_diagnostics["entity_count"] >= 1
 
 
 def test_comparison_process_uses_raw_pdf_without_sidecar(tmp_path, monkeypatch):
@@ -129,8 +139,10 @@ def test_comparison_process_uses_raw_pdf_without_sidecar(tmp_path, monkeypatch):
         "vector_extraction.json",
         "pdf_extraction_diagnostics.json",
         "comparison.json",
+        "manufacturing_specification.json",
     ):
         assert (output / name).is_file()
+    assert result["manufacturing_specification"]["summary"]["matched"] >= 1
 
 
 def test_unsupported_drawing_enters_requirement_discovery(tmp_path, monkeypatch):

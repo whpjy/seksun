@@ -33,6 +33,8 @@ target_link_libraries(
         TKSTEPBase
         TKXSBase
         TKShHealing
+        TKSTL
+        TKMesh
         TKTopAlgo
         TKGeomAlgo
         TKBRep

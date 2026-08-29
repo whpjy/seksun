@@ -115,6 +115,7 @@ class ComparisonToolRegistry:
             "scope": plan.get("scope", {}),
             "extraction": plan.get("extraction", {}),
             "measurements": plan.get("measurements", []),
+            "drawing_entities": plan.get("drawing_entities", [])[:200],
             "requirement_candidates": plan.get("requirement_candidates", [])[:100],
             "annotation_bindings": vector.get("annotation_bindings", []),
             "annotation_candidates": vector.get("annotation_candidates", [])[:100],

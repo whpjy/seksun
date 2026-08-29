@@ -228,15 +228,16 @@ def _parse_annotation(text: str) -> dict[str, Any] | None:
     quantity = int(dimension.group(1) or dimension.group(2) or 1)
     has_diameter_symbol = bool(dimension.group(3))
     tolerance = _parse_number(dimension.group(5))
-    # A repeated, toleranced callout without an explicit symbol is treated as a hole
-    # diameter candidate.  This covers common Bosch-style "(6x)6.5 +/-0.1" drawings
-    # while keeping plain integers conservative.
-    inferred_diameter = quantity > 1 and tolerance is not None
+    nominal = _parse_number(dimension.group(4))
+    # Some embedded drawing fonts drop the diameter glyph during text extraction.
+    # Repeated small callouts are therefore retained as diameter candidates. Large
+    # repeated values (for example 2x83.25) remain linear dimensions.
+    inferred_diameter = quantity > 1 and (tolerance is not None or (nominal or 0) <= 10)
     semantic_type = "diameter" if has_diameter_symbol or inferred_diameter else "linear_dimension"
     confidence = 0.99 if has_diameter_symbol else 0.94 if inferred_diameter else 0.78
     return {
         "semantic_type": semantic_type,
-        "nominal": _parse_number(dimension.group(4)),
+        "nominal": nominal,
         "unit": "mm",
         "quantity": quantity,
         "tolerance": {"upper": tolerance, "lower": -tolerance}

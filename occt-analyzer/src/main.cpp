@@ -6,6 +6,7 @@
 #include <BRepMesh_IncrementalMesh.hxx>
 #include <BRepTools.hxx>
 #include <GeomAbs_SurfaceType.hxx>
+#include <GeomAbs_CurveType.hxx>
 #include <GProp_GProps.hxx>
 #include <IFSelect_ReturnStatus.hxx>
 #include <Interface_Static.hxx>
@@ -224,6 +225,26 @@ struct PlanePair {
     double area_difference_ratio = 0.0;
 };
 
+struct PlaneDistanceFeature {
+    std::string id;
+    Point3 normal;
+    Point3 start;
+    Point3 end;
+    Point3 center;
+    double distance = 0.0;
+    int first_faces = 0;
+    int second_faces = 0;
+};
+
+struct LinearEdgeFeature {
+    std::string id;
+    Point3 start;
+    Point3 end;
+    Point3 center;
+    Point3 direction;
+    double length = 0.0;
+};
+
 struct ThicknessCandidate {
     double thickness = 0.0;
     int evidence = 0;
@@ -267,6 +288,8 @@ struct BendRadiusGroup {
     double radius = 0.0;
     std::string axis_category;
     int normal_direction = 0;
+    Point3 axis;
+    Point3 center;
     int faces = 0;
 };
 
@@ -636,6 +659,75 @@ std::vector<PlaneGroup> collect_plane_groups(const TopoDS_Shape& shape) {
     return groups;
 }
 
+std::vector<PlaneDistanceFeature> collect_plane_distance_features(
+    const TopoDS_Shape& shape) {
+    const std::vector<PlaneGroup> groups = collect_plane_groups(shape);
+    std::vector<PlaneDistanceFeature> result;
+    for (std::size_t first_index = 0; first_index < groups.size(); ++first_index) {
+        for (std::size_t second_index = first_index + 1;
+             second_index < groups.size(); ++second_index) {
+            const PlaneGroup& first = groups[first_index];
+            const PlaneGroup& second = groups[second_index];
+            if (std::abs(dot(first.normal, second.normal)) < 0.99999) continue;
+            const double signed_distance = second.offset - first.offset;
+            const double distance = std::abs(signed_distance);
+            if (distance <= 0.001) continue;
+            const Point3 end = first.centroid + first.normal * signed_distance;
+            PlaneDistanceFeature feature;
+            std::ostringstream id;
+            id << "PD" << std::setw(4) << std::setfill('0') << result.size() + 1;
+            feature.id = id.str();
+            feature.normal = first.normal;
+            feature.start = first.centroid;
+            feature.end = end;
+            feature.center = (feature.start + feature.end) * 0.5;
+            feature.distance = distance;
+            feature.first_faces = first.faces;
+            feature.second_faces = second.faces;
+            result.push_back(feature);
+        }
+    }
+    std::sort(result.begin(), result.end(), [](const auto& left, const auto& right) {
+        if (std::abs(left.distance - right.distance) > Epsilon) {
+            return left.distance < right.distance;
+        }
+        return left.id < right.id;
+    });
+    return result;
+}
+
+std::vector<LinearEdgeFeature> collect_linear_edge_features(
+    const TopoDS_Shape& shape) {
+    std::vector<LinearEdgeFeature> result;
+    TopTools_IndexedMapOfShape edges;
+    TopExp::MapShapes(shape, TopAbs_EDGE, edges);
+    for (Standard_Integer index = 1; index <= edges.Extent(); ++index) {
+        const TopoDS_Edge edge = TopoDS::Edge(edges(index));
+        const BRepAdaptor_Curve curve(edge);
+        if (curve.GetType() != GeomAbs_Line) continue;
+        const Standard_Real first_parameter = curve.FirstParameter();
+        const Standard_Real last_parameter = curve.LastParameter();
+        if (!std::isfinite(first_parameter) || !std::isfinite(last_parameter)) continue;
+        const gp_Pnt first_point = curve.Value(first_parameter);
+        const gp_Pnt last_point = curve.Value(last_parameter);
+        const Point3 start{first_point.X(), first_point.Y(), first_point.Z()};
+        const Point3 end{last_point.X(), last_point.Y(), last_point.Z()};
+        const double edge_length = length(end - start);
+        if (edge_length <= 0.001) continue;
+        LinearEdgeFeature feature;
+        std::ostringstream id;
+        id << 'E' << std::setw(4) << std::setfill('0') << index;
+        feature.id = id.str();
+        feature.start = start;
+        feature.end = end;
+        feature.center = (start + end) * 0.5;
+        feature.direction = canonical_unit(end - start);
+        feature.length = edge_length;
+        result.push_back(feature);
+    }
+    return result;
+}
+
 std::vector<PlaneGroup> get_major_planes(
     const std::vector<PlaneGroup>& groups) {
     std::vector<PlaneGroup> result;
@@ -891,9 +983,13 @@ std::vector<BendRadiusGroup> collect_bend_radius_groups(
         }
         if (target == nullptr) {
             groups.push_back(BendRadiusGroup{
-                radius, category, normal_direction, 0});
+                radius, category, normal_direction, axis, {}, 0});
             target = &groups.back();
         }
+        const gp_Pnt location = cylinder.Location();
+        const Point3 axis_point{location.X(), location.Y(), location.Z()};
+        target->center = (target->center * target->faces + axis_point) *
+            (1.0 / static_cast<double>(target->faces + 1));
         ++target->faces;
     }
 
@@ -1992,6 +2088,47 @@ void append_planar_openings(
     json << ']';
 }
 
+void append_plane_distance_features(
+    std::ostringstream& json,
+    const std::vector<PlaneDistanceFeature>& features) {
+    json << "[";
+    if (!features.empty()) json << '\n';
+    for (std::size_t index = 0; index < features.size(); ++index) {
+        const PlaneDistanceFeature& feature = features[index];
+        json << "    {\"id\": \"" << feature.id << "\", \"distance\": "
+             << feature.distance << ", \"normal\": [" << feature.normal.x << ", "
+             << feature.normal.y << ", " << feature.normal.z << "], \"start\": ["
+             << feature.start.x << ", " << feature.start.y << ", " << feature.start.z
+             << "], \"end\": [" << feature.end.x << ", " << feature.end.y << ", "
+             << feature.end.z << "], \"center\": [" << feature.center.x << ", "
+             << feature.center.y << ", " << feature.center.z << "], \"first_faces\": "
+             << feature.first_faces << ", \"second_faces\": " << feature.second_faces << '}'
+             << (index + 1 < features.size() ? "," : "") << '\n';
+    }
+    if (!features.empty()) json << "  ";
+    json << ']';
+}
+
+void append_linear_edge_features(
+    std::ostringstream& json,
+    const std::vector<LinearEdgeFeature>& features) {
+    json << "[";
+    if (!features.empty()) json << '\n';
+    for (std::size_t index = 0; index < features.size(); ++index) {
+        const LinearEdgeFeature& feature = features[index];
+        json << "    {\"id\": \"" << feature.id << "\", \"length\": "
+             << feature.length << ", \"direction\": [" << feature.direction.x << ", "
+             << feature.direction.y << ", " << feature.direction.z << "], \"start\": ["
+             << feature.start.x << ", " << feature.start.y << ", " << feature.start.z
+             << "], \"end\": [" << feature.end.x << ", " << feature.end.y << ", "
+             << feature.end.z << "], \"center\": [" << feature.center.x << ", "
+             << feature.center.y << ", " << feature.center.z << "]}"
+             << (index + 1 < features.size() ? "," : "") << '\n';
+    }
+    if (!features.empty()) json << "  ";
+    json << ']';
+}
+
 void append_thickness_analysis(
     std::ostringstream& json,
     const ThicknessAnalysis& analysis,
@@ -2093,7 +2230,11 @@ void append_radius_pair_analysis(
         const BendRadiusGroup& group = analysis.bend_groups[index];
         json << indent << "    {\"radius\": " << group.radius
              << ", \"axis\": \"" << group.axis_category
-             << "\", \"side\": \""
+             << "\", \"axis_vector\": [" << group.axis.x << ", "
+             << group.axis.y << ", " << group.axis.z << "], \"center\": ["
+             << group.center.x << ", " << group.center.y << ", "
+             << group.center.z
+             << "], \"side\": \""
              << (group.normal_direction < 0 ? "INNER" : "OUTER")
              << "\", \"faces\": " << group.faces << '}'
              << (index + 1 < analysis.bend_groups.size() ? "," : "")
@@ -2158,6 +2299,8 @@ std::string make_json(
     const std::vector<HolePattern>& hole_patterns,
     const std::vector<DatumDimension>& datum_dimensions,
     const std::vector<PlanarOpening>& planar_openings,
+    const std::vector<PlaneDistanceFeature>& plane_distance_features,
+    const std::vector<LinearEdgeFeature>& linear_edge_features,
     const ThicknessAnalysis& thickness_analysis,
     const RadiusPairAnalysis& radius_pair_analysis,
     double surface_area,
@@ -2167,7 +2310,7 @@ std::string make_json(
     std::ostringstream json;
     json << std::fixed << std::setprecision(6);
     json << "{\n"
-             << "  \"schema_version\": \"0.18.0\",\n"
+             << "  \"schema_version\": \"0.19.0\",\n"
          << "  \"source_file\": \"" << json_escape(input.filename().string()) << "\",\n"
          << "  \"units\": {\"length\": \"mm\", \"area\": \"mm^2\", \"volume\": \"mm^3\"},\n"
          << "  \"topology\": {\n"
@@ -2226,6 +2369,12 @@ std::string make_json(
     json << ",\n"
          << "  \"planar_openings\": ";
     append_planar_openings(json, planar_openings);
+    json << ",\n"
+         << "  \"plane_distance_features\": ";
+    append_plane_distance_features(json, plane_distance_features);
+    json << ",\n"
+         << "  \"linear_edge_features\": ";
+    append_linear_edge_features(json, linear_edge_features);
     json << ",\n"
          << "  \"thickness_analysis\": ";
     append_thickness_analysis(json, thickness_analysis, "  ");
@@ -2343,6 +2492,10 @@ int main(int argc, char* argv[]) {
             build_hole_patterns(hole_axis_groups);
         const std::vector<PlanarOpening> planar_openings =
             collect_planar_openings(shape);
+        const std::vector<PlaneDistanceFeature> plane_distance_features =
+            collect_plane_distance_features(shape);
+        const std::vector<LinearEdgeFeature> linear_edge_features =
+            collect_linear_edge_features(shape);
         const ThicknessAnalysis thickness_analysis = analyze_thickness(shape);
         std::vector<CylinderRadiusGroup> global_cylinder_groups;
         std::vector<TorusRadiusGroup> global_torus_groups;
@@ -2399,6 +2552,8 @@ int main(int argc, char* argv[]) {
             hole_patterns,
             datum_dimensions,
             planar_openings,
+            plane_distance_features,
+            linear_edge_features,
             thickness_analysis,
             radius_pair_analysis,
             surface_properties.Mass(),

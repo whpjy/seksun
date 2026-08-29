@@ -1,211 +1,279 @@
 from __future__ import annotations
 
+import math
 from typing import Any
 
-from service.comparison import CylinderFeature, cylinders_from_analysis
-
+from service.comparison import cylinders_from_analysis
 
 TYPE_WEIGHT = 0.4
 DIMENSION_WEIGHT = 0.4
 CONTEXT_WEIGHT = 0.2
-CANDIDATE_THRESHOLD = 0.3
+CANDIDATE_THRESHOLD = 0.7
 NEAR_TIE_RATIO = 0.9
+
+
+def _point(value: Any, fallback: Any = None) -> list[float]:
+    source = value if isinstance(value, (list, tuple)) and len(value) == 3 else fallback
+    return [round(float(item), 6) for item in (source or [0, 0, 0])]
+
+
+def _axis(value: Any) -> list[float]:
+    if isinstance(value, str):
+        return {"X": [1.0, 0.0, 0.0], "Y": [0.0, 1.0, 0.0], "Z": [0.0, 0.0, 1.0]}.get(value.upper(), [0.0, 0.0, 1.0])
+    return _point(value, [0, 0, 1])
+
+
+def _feature(feature_id: str, kind: str, value: float, center: Any, axis: Any, **extra: Any) -> dict[str, Any]:
+    result = {
+        "id": feature_id,
+        "type": kind,
+        "value": round(float(value), 6),
+        "center": _point(center),
+        "axis": _axis(axis),
+        "source_ids": extra.pop("source_ids", []),
+        "evidence": int(extra.pop("evidence", 1)),
+    }
+    for key in ("start", "end"):
+        if extra.get(key) is not None:
+            extra[key] = _point(extra[key])
+    result.update(extra)
+    return result
+
+
+def _model_bounds(analysis: dict[str, Any]) -> tuple[list[float], list[float], list[float]]:
+    box = ((analysis.get("measurements") or {}).get("bounding_box") or {})
+    minimum = _point(box.get("min"))
+    maximum = _point(box.get("max"))
+    size = _point(box.get("size"), [maximum[i] - minimum[i] for i in range(3)])
+    return minimum, maximum, size
+
+
+def cad_measurement_features(analysis: dict[str, Any]) -> list[dict[str, Any]]:
+    """Normalize OCCT output into auditable linear, radius and diameter candidates."""
+    minimum, maximum, sizes = _model_bounds(analysis)
+    model_center = [(minimum[i] + maximum[i]) / 2 for i in range(3)]
+    features: list[dict[str, Any]] = []
+
+    for cylinder in cylinders_from_analysis(analysis):
+        features.append(_feature(
+            cylinder.id, "cylindrical_feature", cylinder.diameter,
+            cylinder.center, cylinder.axis, diameter=round(cylinder.diameter, 6),
+            internal=cylinder.internal, source_ids=cylinder.source_ids,
+        ))
+
+    for index, (name, value) in enumerate(zip("XYZ", sizes)):
+        start, end = list(model_center), list(model_center)
+        start[index], end[index] = minimum[index], maximum[index]
+        features.append(_feature(
+            f"BBOX-{name}", "bounding_box_dimension", value, model_center, name,
+            start=start, end=end, source_ids=["measurements.bounding_box"],
+        ))
+
+    thickness = analysis.get("thickness_analysis") or {}
+    dominant = float(thickness.get("dominant_thickness") or 0)
+    pairs = thickness.get("dominant_pairs") or []
+    if dominant > 0 and pairs:
+        pair = pairs[0]
+        start = _point(pair.get("first_centroid"), model_center)
+        normal = _axis(pair.get("normal"))
+        end = [start[i] + normal[i] * dominant for i in range(3)]
+        features.append(_feature(
+            "THICKNESS-DOMINANT", "sheet_thickness", dominant,
+            [(start[i] + end[i]) / 2 for i in range(3)], normal,
+            start=start, end=end, evidence=int(thickness.get("dominant_evidence") or len(pairs)),
+            source_ids=[f"thickness-pair-{i + 1}" for i in range(len(pairs))],
+        ))
+
+    holes = {item.get("id"): item for item in analysis.get("hole_axis_groups") or []}
+    datum_groups: dict[tuple[str, int], list[dict[str, Any]]] = {}
+    for datum in analysis.get("datum_dimensions") or []:
+        value = float(datum.get("value") or 0)
+        datum_groups.setdefault((str(datum.get("axis") or ""), round(value * 1000)), []).append(datum)
+    for number, ((axis_name, _), group) in enumerate(datum_groups.items(), 1):
+        value = float(group[0]["value"])
+        axis = _axis(axis_name)
+        end = _point((holes.get(group[0].get("feature_id")) or {}).get("center"), model_center)
+        start = list(end)
+        component = "XYZ".find(axis_name)
+        if component >= 0:
+            start[component] -= value
+        features.append(_feature(
+            f"DATUM-{number:03d}", "datum_dimension", value,
+            [(start[i] + end[i]) / 2 for i in range(3)], axis,
+            start=start, end=end, source_ids=[str(item.get("id")) for item in group], evidence=len(group),
+        ))
+
+    # Reuse the reliable faces from thickness detection as axis-aligned datum
+    # stations. This exposes e.g. the 4.55 mm flange height without pretending an
+    # arbitrary origin coordinate is a measurement.
+    station_seen: set[tuple[int, int]] = set()
+    for pair_index, pair in enumerate(pairs, 1):
+        normal = _axis(pair.get("normal"))
+        component = max(range(3), key=lambda i: abs(normal[i]))
+        if abs(normal[component]) < 0.999:
+            continue
+        for side in ("first", "second"):
+            offset = float(pair.get(f"{side}_offset") or 0)
+            value = abs(offset - minimum[component] * normal[component])
+            key = component, round(value * 1000)
+            if value <= 0.001 or key in station_seen:
+                continue
+            station_seen.add(key)
+            end = _point(pair.get(f"{side}_centroid"), model_center)
+            start = list(end)
+            start[component] -= normal[component] * value
+            features.append(_feature(
+                f"PLANE-STATION-{pair_index:03d}-{side.upper()}", "plane_datum_distance", value,
+                [(start[i] + end[i]) / 2 for i in range(3)], normal,
+                start=start, end=end, source_ids=[f"thickness-pair-{pair_index}"],
+            ))
+
+    for item in analysis.get("plane_distance_features") or []:
+        features.append(_feature(
+            str(item["id"]), "parallel_plane_distance", item["distance"],
+            item.get("center") or model_center, item.get("normal") or "Z",
+            start=item.get("start"), end=item.get("end"), source_ids=item.get("source_ids") or [],
+            evidence=min(int(item.get("first_faces", 1)), int(item.get("second_faces", 1))),
+        ))
+    for item in analysis.get("linear_edge_features") or []:
+        features.append(_feature(
+            str(item["id"]), "linear_edge_length", item["length"],
+            item.get("center") or model_center, item.get("direction") or "Z",
+            start=item.get("start"), end=item.get("end"), source_ids=item.get("source_ids") or [],
+        ))
+
+    radius_analysis = analysis.get("radius_pair_analysis") or {}
+    for index, group in enumerate(radius_analysis.get("bend_groups") or [], 1):
+        radius = float(group.get("radius") or 0)
+        if radius > 0:
+            features.append(_feature(
+                f"BEND-R{index:03d}", "bend_radius", radius,
+                group.get("center") or model_center,
+                group.get("axis_vector") or group.get("axis") or "Z",
+                radius=radius, side=group.get("side"), evidence=int(group.get("faces") or 1),
+                source_ids=[f"bend-group-{index}"],
+            ))
+    for index, patch in enumerate(radius_analysis.get("torus_patches") or [], 1):
+        for radius_name in ("major_radius", "minor_radius"):
+            radius = float(patch.get(radius_name) or 0)
+            if radius > 0:
+                features.append(_feature(
+                    f"TORUS-{index:03d}-{radius_name[0].upper()}", "torus_radius", radius,
+                    patch.get("center") or model_center, patch.get("axis") or "Z",
+                    radius=radius, source_ids=[str(patch.get("face_id"))],
+                ))
+    return features
 
 
 def _tolerance_epsilon(entity: dict[str, Any]) -> float:
     tolerance = entity.get("tolerance") or {}
-    values = [
-        abs(float(value))
-        for value in (tolerance.get("lower"), tolerance.get("upper"))
-        if value is not None
-    ]
-    return max(values or [0.1])
+    explicit = [abs(float(value)) for value in (tolerance.get("lower"), tolerance.get("upper")) if value is not None]
+    nominal = abs(float(entity.get("nominal") or 0))
+    return max(explicit or [0.02, nominal * 0.002])
 
 
-def _type_score(entity: dict[str, Any], feature: CylinderFeature) -> float:
-    semantic_type = entity.get("semantic_type")
-    if semantic_type == "diameter":
-        return 1.0 if feature.internal is True else 0.9 if feature.internal is None else 0.0
-    if semantic_type == "radius":
-        return 1.0 if feature.internal is False else 0.9 if feature.internal is None else 0.0
+def _type_score(entity: dict[str, Any], feature: dict[str, Any]) -> float:
+    semantic, kind = entity.get("semantic_type"), feature["type"]
+    if semantic == "diameter" and kind == "cylindrical_feature":
+        return 1.0 if feature.get("internal") is True else 0.9 if feature.get("internal") is None else 0.0
+    if semantic == "radius":
+        if kind in {"bend_radius", "torus_radius", "circular_edge_radius"}:
+            return 1.0
+        return 0.8 if kind == "cylindrical_feature" and feature.get("internal") is not True else 0.0
+    if semantic == "linear_dimension" and kind in {
+        "bounding_box_dimension", "sheet_thickness", "datum_dimension", "plane_datum_distance",
+        "parallel_plane_distance", "linear_edge_length",
+    }:
+        return 1.0
     return 0.0
 
 
-def _measured_value(entity: dict[str, Any], feature: CylinderFeature) -> float:
-    return feature.diameter / 2.0 if entity.get("semantic_type") == "radius" else feature.diameter
+def _measured_value(entity: dict[str, Any], feature: dict[str, Any]) -> float:
+    if entity.get("semantic_type") == "radius" and feature["type"] == "cylindrical_feature":
+        return float(feature["diameter"]) / 2
+    return float(feature["value"])
 
 
-def _score_candidate(entity: dict[str, Any], feature: CylinderFeature) -> dict[str, Any] | None:
-    type_score = _type_score(entity, feature)
-    if type_score == 0:
-        return None
-    nominal = entity.get("nominal")
-    if nominal is None:
+def _score_candidate(entity: dict[str, Any], feature: dict[str, Any]) -> dict[str, Any] | None:
+    type_score, nominal = _type_score(entity, feature), entity.get("nominal")
+    if type_score == 0 or nominal is None:
         return None
     measured = _measured_value(entity, feature)
-    delta = abs(float(nominal) - measured)
-    epsilon = _tolerance_epsilon(entity)
-    dimension_score = 1.0 if delta <= epsilon else 0.7 if delta <= 2 * epsilon else 0.0
-    context_score = 0.5  # neutral until view/leader association is available
+    delta, epsilon = abs(float(nominal) - measured), _tolerance_epsilon(entity)
+    if delta > epsilon:
+        return None
+    dimension_score = max(0.8, 1 - delta / max(epsilon, 1e-9) * 0.2)
+    context_score = min(0.8, 0.5 + math.log2(max(int(feature.get("evidence") or 1), 1)) * 0.1)
     heuristic = 0.1 if entity.get("diameter_symbol_present") else 0.0
-    score = (
-        TYPE_WEIGHT * type_score
-        + DIMENSION_WEIGHT * dimension_score
-        + CONTEXT_WEIGHT * context_score
-        + heuristic
-    )
-    if dimension_score == 0:
-        score *= 0.3
+    score = TYPE_WEIGHT * type_score + DIMENSION_WEIGHT * dimension_score + CONTEXT_WEIGHT * context_score + heuristic
     if score < CANDIDATE_THRESHOLD:
         return None
     return {
-        "cad_feature_id": feature.id,
-        "score": round(score, 6),
-        "score_components": {
-            "type": type_score,
-            "dimension": dimension_score,
-            "context": context_score,
-            "heuristic": heuristic,
-        },
-        "measured_value": round(measured, 6),
-        "dimension_delta": round(delta, 6),
-    }
-
-
-def _cad_feature_record(feature: CylinderFeature) -> dict[str, Any]:
-    return {
-        "id": feature.id,
-        "type": "cylindrical_feature",
-        "center": [round(value, 6) for value in feature.center],
-        "axis": [round(value, 8) for value in feature.axis],
-        "diameter": round(feature.diameter, 6),
-        "internal": feature.internal,
-        "source_ids": feature.source_ids,
+        "cad_feature_id": feature["id"], "score": round(score, 6),
+        "score_components": {"type": type_score, "dimension": round(dimension_score, 6), "context": round(context_score, 6), "heuristic": heuristic},
+        "measured_value": round(measured, 6), "dimension_delta": round(delta, 6),
     }
 
 
 def _within_tolerance(entity: dict[str, Any], measured: float) -> bool | None:
-    nominal = entity.get("nominal")
-    tolerance = entity.get("tolerance")
+    nominal, tolerance = entity.get("nominal"), entity.get("tolerance")
     if nominal is None or not tolerance:
         return None
-    lower = float(nominal) + float(tolerance.get("lower") or 0.0)
-    upper = float(nominal) + float(tolerance.get("upper") or 0.0)
+    lower = float(nominal) + float(tolerance.get("lower") or 0)
+    upper = float(nominal) + float(tolerance.get("upper") or 0)
     return lower - 1e-8 <= measured <= upper + 1e-8
 
 
-def build_manufacturing_specification(
-    measurement_plan: dict[str, Any],
-    analysis: dict[str, Any],
-    comparison: dict[str, Any],
-) -> dict[str, Any]:
-    """Build an auditable deterministic-first 2D/3D correspondence document."""
-
+def build_manufacturing_specification(measurement_plan: dict[str, Any], analysis: dict[str, Any], comparison: dict[str, Any]) -> dict[str, Any]:
     entities = list(measurement_plan.get("drawing_entities") or [])
-    cylinders = cylinders_from_analysis(analysis)
-    cad_by_id = {feature.id: feature for feature in cylinders}
+    cad_features = cad_measurement_features(analysis)
     mappings: list[dict[str, Any]] = []
     rows: list[dict[str, Any]] = []
-
-    specialized_entity_id = None
     measurements = measurement_plan.get("measurements") or []
-    if measurements:
-        specialized_entity_id = (measurements[0].get("source") or {}).get("drawing_entity_id")
-    specialized_features = comparison.get("features") or []
+    specialized_id = (measurements[0].get("source") or {}).get("drawing_entity_id") if measurements else None
+    specialized = comparison.get("features") or []
 
     for entity in entities:
         entity_id = entity["id"]
-        if entity_id == specialized_entity_id and specialized_features:
-            cad_feature_ids = [item["step_feature_id"] for item in specialized_features]
-            measured_values = [float(item["actual_diameter"]) for item in specialized_features]
+        if entity_id == specialized_id and specialized:
+            ids = [item["step_feature_id"] for item in specialized]
+            values = [float(item["actual_diameter"]) for item in specialized]
             mapping = {
-                "drawing_entity_id": entity_id,
-                "cad_feature_ids": cad_feature_ids,
-                "status": "matched",
-                "method": "deterministic_rigid_pattern_match",
-                "confidence": 0.99,
-                "score_components": {
-                    "type": 1.0,
-                    "dimension": 1.0,
-                    "context": 1.0,
-                    "pattern_registration": 1.0,
-                },
-                "rationale": "孔数量、直径与二维阵列经过旋转/镜像/平移不变配准后对应。",
+                "drawing_entity_id": entity_id, "cad_feature_ids": ids, "status": "matched",
+                "method": "deterministic_rigid_pattern_match", "confidence": 0.99,
+                "score_components": {"type": 1.0, "dimension": 1.0, "context": 1.0, "pattern_registration": 1.0},
+                "rationale": "孔数量、直径与二维阵列经过刚体不变配准后建立唯一对应。",
                 "provenance": {"created_by": "system", "reviewed_by": None},
             }
             mappings.append(mapping)
-            rows.append(
-                {
-                    "drawing_entity": entity,
-                    "mapping_status": "matched",
-                    "cad_feature_ids": cad_feature_ids,
-                    "candidate_count": len(cad_feature_ids),
-                    "measured_values": measured_values,
-                    "result": comparison.get("result"),
-                    "method": mapping["method"],
-                    "confidence": mapping["confidence"],
-                }
-            )
+            rows.append({"drawing_entity": entity, "mapping_status": "matched", "cad_feature_ids": ids, "candidate_count": len(ids), "measured_values": values, "result": comparison.get("result"), "method": mapping["method"], "confidence": 0.99})
             continue
 
-        candidates = [
-            candidate
-            for feature in cylinders
-            if (candidate := _score_candidate(entity, feature)) is not None
-        ]
+        candidates = [candidate for feature in cad_features if (candidate := _score_candidate(entity, feature)) is not None]
         candidates.sort(key=lambda item: (-item["score"], item["cad_feature_id"]))
-        retained = (
-            [item for item in candidates if item["score"] >= candidates[0]["score"] * NEAR_TIE_RATIO]
-            if candidates
-            else []
-        )
-        requested_quantity = int(entity.get("quantity") or 1)
-        if len(retained) == 1 and requested_quantity == 1:
-            selected = retained[0]
-            feature = cad_by_id[selected["cad_feature_id"]]
-            measured = _measured_value(entity, feature)
-            passed = _within_tolerance(entity, measured)
-            status = "matched"
-            result = "pass" if passed is True else "fail" if passed is False else "not_evaluated"
-            cad_feature_ids = [feature.id]
-            confidence = min(0.95, selected["score"])
-            rationale = "类型兼容且尺寸候选唯一；空间上下文尚使用保守中性分。"
+        retained = [item for item in candidates if item["score"] >= candidates[0]["score"] * NEAR_TIE_RATIO] if candidates else []
+        quantity = int(entity.get("quantity") or 1)
+        if retained and len(retained) == quantity:
+            status, ids = "matched", [item["cad_feature_id"] for item in retained]
+            values = [item["measured_value"] for item in retained]
+            checks = [_within_tolerance(entity, value) for value in values]
+            result = "fail" if False in checks else "pass" if checks and all(value is True for value in checks) else "not_evaluated"
+            confidence, rationale = min(0.95, retained[0]["score"]), "类型与尺寸一致，且精确候选数量和图纸标注数量一致。"
         elif retained:
-            status = "ambiguous"
-            result = "not_evaluated"
-            cad_feature_ids = [item["cad_feature_id"] for item in retained]
-            confidence = retained[0]["score"]
-            rationale = "存在多个近似并列的几何候选，需要视图、引线或人工上下文消歧。"
+            status, ids = "ambiguous", [item["cad_feature_id"] for item in retained]
+            values, result = [item["measured_value"] for item in retained], "not_evaluated"
+            confidence, rationale = retained[0]["score"], "存在多个同分候选；保留候选并等待视图、引线或人工上下文消歧。"
         else:
-            status = "unmapped"
-            result = "not_evaluated"
-            cad_feature_ids = []
-            confidence = 0.0
-            rationale = "当前最小实现没有找到满足类型与尺寸门控的三维特征。"
-
+            status, ids, values, result, confidence = "unmapped", [], [], "not_evaluated", 0.0
+            rationale = "没有找到同时满足几何类型与尺寸门限的三维候选。"
         mapping = {
-            "drawing_entity_id": entity_id,
-            "cad_feature_ids": cad_feature_ids,
-            "status": status,
-            "method": "weighted_deterministic_scoring",
-            "confidence": round(confidence, 6),
-            "candidates": retained,
-            "rationale": rationale,
+            "drawing_entity_id": entity_id, "cad_feature_ids": ids, "status": status,
+            "method": "weighted_deterministic_scoring", "confidence": round(confidence, 6),
+            "candidates": retained, "rationale": rationale,
             "provenance": {"created_by": "system", "reviewed_by": None},
         }
         mappings.append(mapping)
-        rows.append(
-            {
-                "drawing_entity": entity,
-                "mapping_status": status,
-                "cad_feature_ids": cad_feature_ids,
-                "candidate_count": len(retained),
-                "measured_values": [item["measured_value"] for item in retained],
-                "result": result,
-                "method": mapping["method"],
-                "confidence": mapping["confidence"],
-            }
-        )
+        rows.append({"drawing_entity": entity, "mapping_status": status, "cad_feature_ids": ids, "candidate_count": len(retained), "measured_values": values, "result": result, "method": mapping["method"], "confidence": mapping["confidence"]})
 
     summary = {
         "drawing_entities": len(entities),
@@ -214,16 +282,9 @@ def build_manufacturing_specification(
         "unmapped": sum(item["status"] == "unmapped" for item in mappings),
     }
     return {
-        "schema_version": "1.0.0",
-        "method": "deterministic_first_context_aware_correspondence",
-        "scoring": {
-            "weights": {"type": TYPE_WEIGHT, "dimension": DIMENSION_WEIGHT, "context": CONTEXT_WEIGHT},
-            "candidate_threshold": CANDIDATE_THRESHOLD,
-            "near_tie_ratio": NEAR_TIE_RATIO,
-        },
-        "drawing_entities": entities,
-        "cad_features": [_cad_feature_record(feature) for feature in cylinders],
-        "mappings": mappings,
+        "schema_version": "1.1.0", "method": "deterministic_first_context_aware_correspondence",
+        "scoring": {"weights": {"type": TYPE_WEIGHT, "dimension": DIMENSION_WEIGHT, "context": CONTEXT_WEIGHT}, "candidate_threshold": CANDIDATE_THRESHOLD, "near_tie_ratio": NEAR_TIE_RATIO},
+        "drawing_entities": entities, "cad_features": cad_features, "mappings": mappings,
         "comparison_rows": rows,
         "unmapped_entity_ids": [item["drawing_entity_id"] for item in mappings if item["status"] == "unmapped"],
         "summary": summary,

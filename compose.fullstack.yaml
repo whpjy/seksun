@@ -10,7 +10,9 @@ services:
       MEAS_MAX_UPLOAD_MB: "${MEAS_MAX_UPLOAD_MB:-200}"
       MEAS_PROCESS_TIMEOUT_SECONDS: "${MEAS_PROCESS_TIMEOUT_SECONDS:-600}"
       MEAS_MAX_CONCURRENT_JOBS: "${MEAS_MAX_CONCURRENT_JOBS:-2}"
-      MEAS_CORS_ORIGINS: "${MEAS_CORS_ORIGINS:-http://localhost:5173}"
+      MEAS_CORS_ORIGINS: "${MEAS_CORS_ORIGINS:-http://localhost:5173,http://127.0.0.1:5173,http://localhost:3000}"
+      MEAS_STORAGE_ROOT: /var/lib/seksun-meas/jobs
+      MEAS_HISTORY_DB: /var/lib/seksun-meas/history.sqlite3
       DASHSCOPE_API_KEY: "${DASHSCOPE_API_KEY:-}"
       QWEN_BASE_URL: "${QWEN_BASE_URL:-https://dashscope.aliyuncs.com/compatible-mode/v1}"
       AGENT_DEFAULT_MODEL: "${AGENT_DEFAULT_MODEL:-qwen3.7-plus-2026-05-26}"
@@ -19,7 +21,7 @@ services:
       AGENT_ESCALATION_RESIDUAL_MM: "${AGENT_ESCALATION_RESIDUAL_MM:-0.15}"
       AGENT_MODEL_MODE: "${AGENT_MODEL_MODE:-auto}"
     volumes:
-      - meas-jobs:/data/jobs
+      - ./.seksun-meas:/var/lib/seksun-meas:Z
     ports:
       - "8080:8080"
     restart: unless-stopped
@@ -33,6 +35,3 @@ services:
     ports:
       - "${WEB_PORT:-3000}:80"
     restart: unless-stopped
-
-volumes:
-  meas-jobs:

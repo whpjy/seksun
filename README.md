@@ -39,7 +39,7 @@ Content-Type: multipart/form-data
 字段名: file
 ```
 
-接口会同步完成 STEP 分析和三视图生成，并返回分析 JSON、SVG、视图清单与 ZIP 下载地址。任务数据默认保存在 Docker 卷 `meas-jobs` 中。
+接口会同步完成 STEP 分析和三视图生成，并返回分析 JSON、SVG、视图清单与 ZIP 下载地址。
 
 ## PDF / STEP 对比（首个闭环）
 
@@ -57,6 +57,33 @@ Content-Type: multipart/form-data
 - `vector_extraction.json`：视图比例、六孔矢量圆和相对中心坐标。
 - `pdf_extraction_diagnostics.json`：文本、路径和候选数量等诊断信息。
 - `comparison.json`：PDF 与 STEP 的逐孔比较结果。
+
+### 对比历史与服务器持久化
+
+每次调用 `POST /api/v1/comparisons` 都会创建一个服务器会话。原始 PDF、STEP、
+STL 和全部结构化输出保存在项目隐藏目录 `.seksun-meas/jobs/{job_id}`，历史索引
+保存在 `.seksun-meas/history.sqlite3`。前端本机只通过 API 加载数据，不保存文件副本。
+
+历史接口：
+
+```text
+GET /api/v1/comparisons
+GET /api/v1/comparisons/{job_id}
+GET /api/v1/comparisons/{job_id}/inputs/pdf
+GET /api/v1/comparisons/{job_id}/inputs/step
+```
+
+服务器首次部署前创建可写的隐藏目录：
+
+```bash
+mkdir -p .seksun-meas/jobs
+chown -R 10001:10001 .seksun-meas
+chmod -R 750 .seksun-meas
+```
+
+`compose.service.yaml` 将该目录绑定到容器的 `/var/lib/seksun-meas`。因此重新构建
+或替换容器不会删除历史，`docker compose down -v` 也不会删除这个绑定目录。
+不要把 `.seksun-meas` 提交到 Git；项目 `.gitignore` 已包含相应规则。
 
 当前自动解析范围是原生矢量 PDF 中的“数量 × 孔径 ± 对称公差”标注，圆轮廓需由标准三次贝塞尔圆路径构成。扫描 PDF、非对称公差和其他尺寸类型将在后续阶段扩展。
 

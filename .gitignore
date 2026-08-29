@@ -46,6 +46,7 @@ venv/
 *.step
 
 # Local data packages and exported bundles
+.seksun-meas/
 *.zip
 *.7z
 *.tar

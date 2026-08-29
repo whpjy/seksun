@@ -119,3 +119,11 @@ def test_comparison_upload_endpoint(tmp_path, monkeypatch):
         comparison = client.get(payload["results"]["comparison"])
         assert comparison.status_code == 200
         assert comparison.json()["measurement_id"] == "C10"
+        history = client.get("/api/v1/comparisons")
+        assert history.status_code == 200
+        assert history.json()["items"][0]["id"] == payload["id"]
+        restored = client.get(f"/api/v1/comparisons/{payload['id']}")
+        assert restored.status_code == 200
+        assert restored.json()["comparison"]["result"] == "fail"
+        assert client.get(restored.json()["inputs"]["pdf"]).content == b"vector-pdf"
+        assert client.get(restored.json()["inputs"]["step"]).content == b"ISO-10303-21"

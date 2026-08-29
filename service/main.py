@@ -5,11 +5,13 @@ import json
 import os
 import re
 import shutil
+import sqlite3
 import subprocess
 import time
 import uuid
 import zipfile
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Annotated, AsyncIterator
 
@@ -30,7 +32,9 @@ from service.pdf_extraction import discover_drawing_requirements, extract_c10_fr
 load_dotenv(Path(__file__).resolve().parents[1] / ".env", override=False)
 
 APP_VERSION = "1.0.0"
-STORAGE_ROOT = Path(os.getenv("MEAS_STORAGE_ROOT", "/data/jobs")).resolve()
+STORAGE_ROOT = Path(
+    os.getenv("MEAS_STORAGE_ROOT", str(Path.home() / ".seksun-meas" / "jobs"))
+).resolve()
 ANALYZER_BIN = os.getenv("MEAS_ANALYZER_BIN", "occt-analyzer")
 PROJECTOR_BIN = os.getenv("MEAS_PROJECTOR_BIN", "occt-projector")
 MAX_UPLOAD_BYTES = int(os.getenv("MEAS_MAX_UPLOAD_MB", "200")) * 1024 * 1024
@@ -74,6 +78,8 @@ agent_tasks: set[asyncio.Task] = set()
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     STORAGE_ROOT.mkdir(parents=True, exist_ok=True)
+    initialize_history_index()
+    reindex_existing_comparisons()
     yield
 
 
@@ -110,6 +116,9 @@ class ComparisonJobResponse(BaseModel):
     status: str
     pdf_filename: str
     step_filename: str
+    pdf_size: int = 0
+    step_size: int = 0
+    created_at: str | None = None
     elapsed_seconds: float
     comparison: dict
     results: ComparisonLinks
@@ -125,7 +134,10 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=[
         item.strip()
-        for item in os.getenv("MEAS_CORS_ORIGINS", "http://localhost:5173").split(",")
+        for item in os.getenv(
+            "MEAS_CORS_ORIGINS",
+            "http://localhost:5173,http://127.0.0.1:5173",
+        ).split(",")
         if item.strip()
     ],
     allow_methods=["GET", "POST", "OPTIONS"],
@@ -194,6 +206,119 @@ def write_metadata(directory: Path, metadata: dict) -> None:
     (directory / "job.json").write_text(
         json.dumps(metadata, ensure_ascii=False, indent=2), encoding="utf-8"
     )
+
+
+def utc_now() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def history_db_path() -> Path:
+    configured = os.getenv("MEAS_HISTORY_DB")
+    if configured:
+        return Path(configured).resolve()
+    return STORAGE_ROOT.parent / "history.sqlite3" if STORAGE_ROOT.name == "jobs" else STORAGE_ROOT / ".history.sqlite3"
+
+
+def history_connection() -> sqlite3.Connection:
+    connection = sqlite3.connect(history_db_path(), timeout=15)
+    connection.row_factory = sqlite3.Row
+    return connection
+
+
+def initialize_history_index() -> None:
+    database = history_db_path()
+    database.parent.mkdir(parents=True, exist_ok=True)
+    with history_connection() as connection:
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS comparison_history (
+                id TEXT PRIMARY KEY,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                status TEXT NOT NULL,
+                pdf_filename TEXT NOT NULL,
+                step_filename TEXT NOT NULL,
+                pdf_size INTEGER NOT NULL DEFAULT 0,
+                step_size INTEGER NOT NULL DEFAULT 0,
+                elapsed_seconds REAL NOT NULL DEFAULT 0,
+                result TEXT,
+                matched INTEGER NOT NULL DEFAULT 0,
+                ambiguous INTEGER NOT NULL DEFAULT 0,
+                unmapped INTEGER NOT NULL DEFAULT 0,
+                error TEXT
+            )
+            """
+        )
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS comparison_history_created_at ON comparison_history(created_at DESC)"
+        )
+
+
+def comparison_status_counts(comparison: dict | None) -> tuple[int, int, int]:
+    counts = {"matched": 0, "ambiguous": 0, "unmapped": 0}
+    for row in (comparison or {}).get("comparison_rows", []):
+        status = row.get("mapping_status")
+        if status in counts:
+            counts[status] += 1
+    return counts["matched"], counts["ambiguous"], counts["unmapped"]
+
+
+def index_comparison(metadata: dict, comparison: dict | None = None) -> None:
+    initialize_history_index()
+    matched, ambiguous, unmapped = comparison_status_counts(comparison)
+    now = utc_now()
+    created_at = str(metadata.get("created_at") or now)
+    with history_connection() as connection:
+        connection.execute(
+            """
+            INSERT INTO comparison_history (
+                id, created_at, updated_at, status, pdf_filename, step_filename,
+                pdf_size, step_size, elapsed_seconds, result, matched, ambiguous,
+                unmapped, error
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET
+                updated_at=excluded.updated_at,
+                status=excluded.status,
+                pdf_filename=excluded.pdf_filename,
+                step_filename=excluded.step_filename,
+                pdf_size=excluded.pdf_size,
+                step_size=excluded.step_size,
+                elapsed_seconds=excluded.elapsed_seconds,
+                result=excluded.result,
+                matched=excluded.matched,
+                ambiguous=excluded.ambiguous,
+                unmapped=excluded.unmapped,
+                error=excluded.error
+            """,
+            (
+                metadata["id"], created_at, now, metadata.get("status", "processing"),
+                metadata.get("pdf_filename", ""), metadata.get("step_filename", ""),
+                int(metadata.get("pdf_size", 0)), int(metadata.get("step_size", 0)),
+                float(metadata.get("elapsed_seconds", 0)),
+                (comparison or {}).get("result"), matched, ambiguous, unmapped,
+                metadata.get("error"),
+            ),
+        )
+
+
+def reindex_existing_comparisons() -> None:
+    for metadata_path in STORAGE_ROOT.glob("*/job.json"):
+        try:
+            metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+            if not metadata.get("pdf_filename") or not metadata.get("step_filename"):
+                continue
+            directory = metadata_path.parent
+            if not metadata.get("created_at"):
+                metadata["created_at"] = datetime.fromtimestamp(
+                    metadata_path.stat().st_mtime, timezone.utc
+                ).isoformat()
+            comparison_path = directory / "comparison.json"
+            comparison = json.loads(comparison_path.read_text(encoding="utf-8")) if comparison_path.is_file() else None
+            metadata.setdefault("pdf_size", (directory / metadata["pdf_filename"]).stat().st_size if (directory / metadata["pdf_filename"]).is_file() else 0)
+            metadata.setdefault("step_size", (directory / metadata["step_filename"]).stat().st_size if (directory / metadata["step_filename"]).is_file() else 0)
+            index_comparison(metadata, comparison)
+        except (OSError, ValueError, KeyError, json.JSONDecodeError):
+            continue
 
 
 def run_command(arguments: list[str]) -> None:
@@ -502,9 +627,24 @@ async def create_comparison(
     pdf_path = directory / pdf_name
     step_path = directory / step_name
     started = time.perf_counter()
+    created_at = utc_now()
+    pdf_size = 0
+    step_size = 0
     try:
-        await save_upload(pdf, pdf_path)
-        await save_upload(step, step_path)
+        pdf_size = await save_upload(pdf, pdf_path)
+        step_size = await save_upload(step, step_path)
+        processing_metadata = {
+            "id": job_id,
+            "status": "processing",
+            "pdf_filename": pdf_name,
+            "step_filename": step_name,
+            "pdf_size": pdf_size,
+            "step_size": step_size,
+            "created_at": created_at,
+            "elapsed_seconds": 0.0,
+        }
+        write_metadata(directory, processing_metadata)
+        index_comparison(processing_metadata)
         async with job_slots:
             comparison = await asyncio.to_thread(
                 process_pdf_step_comparison,
@@ -517,9 +657,13 @@ async def create_comparison(
             "status": "completed",
             "pdf_filename": pdf_name,
             "step_filename": step_name,
+            "pdf_size": pdf_size,
+            "step_size": step_size,
+            "created_at": created_at,
             "elapsed_seconds": round(time.perf_counter() - started, 3),
         }
         write_metadata(directory, metadata)
+        index_comparison(metadata, comparison)
         return build_comparison_response(metadata, comparison)
     except HTTPException:
         shutil.rmtree(directory, ignore_errors=True)
@@ -530,14 +674,80 @@ async def create_comparison(
             "status": "failed",
             "pdf_filename": pdf_name,
             "step_filename": step_name,
+            "pdf_size": pdf_size,
+            "step_size": step_size,
+            "created_at": created_at,
             "elapsed_seconds": round(time.perf_counter() - started, 3),
             "error": str(exc),
         }
         write_metadata(directory, metadata)
+        index_comparison(metadata)
         raise HTTPException(status_code=422, detail=f"PDF/STEP 对比失败: {exc}") from exc
     finally:
         await pdf.close()
         await step.close()
+
+
+@app.get("/api/v1/comparisons")
+def list_comparisons(limit: int = 50, offset: int = 0) -> dict:
+    initialize_history_index()
+    safe_limit = min(max(limit, 1), 200)
+    safe_offset = max(offset, 0)
+    with history_connection() as connection:
+        total = int(connection.execute("SELECT COUNT(*) FROM comparison_history").fetchone()[0])
+        rows = connection.execute(
+            """
+            SELECT id, created_at, updated_at, status, pdf_filename, step_filename,
+                   pdf_size, step_size, elapsed_seconds, result, matched,
+                   ambiguous, unmapped, error
+            FROM comparison_history
+            ORDER BY created_at DESC
+            LIMIT ? OFFSET ?
+            """,
+            (safe_limit, safe_offset),
+        ).fetchall()
+    return {"items": [dict(row) for row in rows], "total": total}
+
+
+@app.get("/api/v1/comparisons/{comparison_id}")
+def get_comparison(comparison_id: str) -> dict:
+    directory = job_dir(comparison_id)
+    metadata_path = directory / "job.json"
+    comparison_path = directory / "comparison.json"
+    if not metadata_path.is_file():
+        raise HTTPException(status_code=404, detail="历史对比不存在")
+    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    if not metadata.get("pdf_filename") or not metadata.get("step_filename"):
+        raise HTTPException(status_code=404, detail="该任务不是 PDF/STEP 对比")
+    if metadata.get("status") != "completed" or not comparison_path.is_file():
+        raise HTTPException(status_code=422, detail=metadata.get("error", "历史对比尚未完成"))
+    comparison = json.loads(comparison_path.read_text(encoding="utf-8"))
+    metadata.setdefault("created_at", datetime.fromtimestamp(metadata_path.stat().st_mtime, timezone.utc).isoformat())
+    metadata.setdefault("pdf_size", (directory / metadata["pdf_filename"]).stat().st_size if (directory / metadata["pdf_filename"]).is_file() else 0)
+    metadata.setdefault("step_size", (directory / metadata["step_filename"]).stat().st_size if (directory / metadata["step_filename"]).is_file() else 0)
+    response = build_comparison_response(metadata, comparison).model_dump()
+    response["inputs"] = {
+        "pdf": f"/api/v1/comparisons/{comparison_id}/inputs/pdf",
+        "step": f"/api/v1/comparisons/{comparison_id}/inputs/step",
+    }
+    return response
+
+
+@app.get("/api/v1/comparisons/{comparison_id}/inputs/{input_kind}")
+def get_comparison_input(comparison_id: str, input_kind: str) -> FileResponse:
+    directory = job_dir(comparison_id).resolve()
+    metadata_path = directory / "job.json"
+    if not metadata_path.is_file():
+        raise HTTPException(status_code=404, detail="历史对比不存在")
+    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    key = "pdf_filename" if input_kind == "pdf" else "step_filename" if input_kind == "step" else None
+    if key is None or not metadata.get(key):
+        raise HTTPException(status_code=404, detail="原始文件不存在")
+    target = (directory / safe_filename(metadata[key])).resolve()
+    if directory not in target.parents or not target.is_file():
+        raise HTTPException(status_code=404, detail="原始文件不存在")
+    media_type = "application/pdf" if input_kind == "pdf" else "model/step"
+    return FileResponse(target, media_type=media_type, filename=None)
 
 
 @app.post("/api/v1/agent-runs", status_code=202)
@@ -702,7 +912,8 @@ def download_results(job_id: str) -> FileResponse:
                 if path.is_file():
                     output.write(path, name)
     metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
-    download_name = f"{Path(metadata['filename']).stem}-results.zip"
+    source_name = metadata.get("filename") or metadata.get("step_filename") or metadata.get("pdf_filename") or job_id
+    download_name = f"{Path(source_name).stem}-results.zip"
     return FileResponse(
         archive,
         media_type="application/zip",

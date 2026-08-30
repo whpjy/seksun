@@ -1,8 +1,8 @@
 FROM ubuntu:24.04 AS builder
 
 ENV DEBIAN_FRONTEND=noninteractive
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends \
+RUN apt-get -o Acquire::Retries=5 update \
+    && apt-get -o Acquire::Retries=5 install -y --no-install-recommends \
         build-essential cmake ninja-build libtbb-dev nlohmann-json3-dev \
         libocct-data-exchange-dev libocct-modeling-algorithms-dev \
         libocct-ocaf-dev libocct-visualization-dev \
@@ -28,8 +28,8 @@ ENV DEBIAN_FRONTEND=noninteractive \
     PATH="/opt/venv/bin:${PATH}" \
     MEAS_STORAGE_ROOT=/var/lib/seksun-meas/jobs \
     MEAS_HISTORY_DB=/var/lib/seksun-meas/history.sqlite3
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends \
+RUN apt-get -o Acquire::Retries=5 update \
+    && apt-get -o Acquire::Retries=5 install -y --no-install-recommends \
         python3 python3-venv libcairo2 libocct-data-exchange-7.6t64 \
         libocct-modeling-algorithms-7.6t64 \
     && rm -rf /var/lib/apt/lists/*

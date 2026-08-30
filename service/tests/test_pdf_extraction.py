@@ -50,6 +50,10 @@ def _write_vector_pdf(path: Path) -> None:
         "BT /F1 10 Tf 1 0 0 1 206 695 Tm (\\(6x\\)6.5 +/-0.1) Tj ET",
         "BT /F1 10 Tf 1 0 0 1 242 708 Tm (10) Tj ET",
         "BT /F1 10 Tf 1 0 0 1 367 787 Tm (2:1) Tj ET",
+        "BT /F1 10 Tf 1 0 0 1 500 500 Tm (12.5) Tj ET",
+        "q 1 0 0 1 530 500 cm BT /F1 10 Tf 1 0 0 1 0 0 Tm (0.1) Tj ET Q",
+        "q 1 0 0 1 600 500 cm BT /F1 10 Tf 1 0 0 1 0 0 Tm (158) Tj ET Q",
+        "590 497 m 610 497 l 590 509 m 610 509 l S",
     ]
     commands.extend(
         _circle_commands(150 + x * scale, 659 + y * scale, radius)
@@ -91,6 +95,9 @@ def test_extracts_c10_from_raw_vector_pdf(tmp_path):
     assert repeated_hole["quantity"] == 6
     assert repeated_hole["tolerance"] == {"upper": 0.1, "lower": -0.1}
     assert entity_diagnostics["entity_count"] >= 1
+    split_tolerance = next(item for item in entities if item["nominal"] == 12.5)
+    assert split_tolerance["tolerance"] == {"upper": 0.1, "lower": -0.1}
+    assert all(item["raw_text"] != "158" for item in entities)
 
 
 def test_comparison_process_uses_raw_pdf_without_sidecar(tmp_path, monkeypatch):

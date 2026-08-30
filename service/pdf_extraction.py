@@ -108,20 +108,26 @@ def extract_page_graph(pdf_path: Path, page_number: int = 1) -> dict:
         elif operator == b"h":
             current_path.append(("h", ()))
         elif operator in {b"S", b"s", b"f", b"f*", b"B", b"B*", b"b", b"b*", b"n"}:
-            points = [point for _, command_points in current_path for point in command_points]
-            if points:
+            # A single PDF paint operation often contains hundreds of disconnected
+            # subpaths. Keeping one combined bounding box loses small inspection
+            # boxes and leader segments inside a page-sized bound, so preserve each
+            # move-to-delimited subpath independently.
+            subpaths: list[list[tuple[str, tuple[tuple[float, float], ...]]]] = []
+            for command in current_path:
+                if command[0] == "m" or not subpaths:
+                    subpaths.append([])
+                subpaths[-1].append(command)
+            for subpath in subpaths:
+                points = [point for _, command_points in subpath for point in command_points]
+                if not points:
+                    continue
                 x_values = [point[0] for point in points]
                 y_values = [point[1] for point in points]
                 paths.append(
                     VectorPath(
-                        signature="".join(command for command, _ in current_path),
+                        signature="".join(command for command, _ in subpath),
                         paint_operator=operator.decode("ascii"),
-                        bounds=(
-                            min(x_values),
-                            min(y_values),
-                            max(x_values),
-                            max(y_values),
-                        ),
+                        bounds=(min(x_values), min(y_values), max(x_values), max(y_values)),
                     )
                 )
             current_path = []
@@ -216,6 +222,31 @@ def _parse_annotation(text: str) -> dict[str, Any] | None:
             "confidence": 0.98,
         }
 
+    asymmetric_dimension = re.fullmatch(
+        r"(?:\((\d+)[xX]\)|(\d+)[xX])?([Ø]?)([0-9]+(?:[.,][0-9]+)?)"
+        r"\+([0-9]+(?:[.,][0-9]+)?)/-([0-9]+(?:[.,][0-9]+)?)",
+        compact,
+        re.IGNORECASE,
+    )
+    if asymmetric_dimension:
+        quantity = int(asymmetric_dimension.group(1) or asymmetric_dimension.group(2) or 1)
+        has_diameter_symbol = bool(asymmetric_dimension.group(3))
+        nominal = _parse_number(asymmetric_dimension.group(4))
+        semantic_type = "diameter" if has_diameter_symbol else "linear_dimension"
+        return {
+            "semantic_type": semantic_type,
+            "nominal": nominal,
+            "unit": "mm",
+            "quantity": quantity,
+            "tolerance": {
+                "upper": _parse_number(asymmetric_dimension.group(5)),
+                "lower": -float(_parse_number(asymmetric_dimension.group(6)) or 0),
+            },
+            "target_feature_type": "cylindrical_hole" if semantic_type == "diameter" else "linear_geometry",
+            "confidence": 0.99 if has_diameter_symbol else 0.9,
+            "diameter_symbol_present": has_diameter_symbol,
+        }
+
     dimension = re.fullmatch(
         r"(?:\((\d+)[xX]\)|(\d+)[xX])?([Ø]?)([0-9]+(?:[.,][0-9]+)?)"
         r"(?:(?:±|\+/-)([0-9]+(?:[.,][0-9]+)?))?",
@@ -232,7 +263,9 @@ def _parse_annotation(text: str) -> dict[str, Any] | None:
     # Some embedded drawing fonts drop the diameter glyph during text extraction.
     # Repeated small callouts are therefore retained as diameter candidates. Large
     # repeated values (for example 2x83.25) remain linear dimensions.
-    inferred_diameter = quantity > 1 and (tolerance is not None or (nominal or 0) <= 10)
+    inferred_diameter = quantity > 1 and (
+        tolerance is not None or 1 < float(nominal or 0) <= 15
+    )
     semantic_type = "diameter" if has_diameter_symbol or inferred_diameter else "linear_dimension"
     confidence = 0.99 if has_diameter_symbol else 0.94 if inferred_diameter else 0.78
     return {
@@ -256,17 +289,22 @@ def extract_drawing_entities(pdf_path: Path, page_number: int = 1) -> tuple[list
     entities: list[dict[str, Any]] = []
     page_width = float(graph["width"])
     page_height = float(graph["height"])
+    inspection_cache: dict[TextItem, bool] = {}
 
     def is_inspection_label(item: TextItem) -> bool:
         """Detect the small boxed inspection indices used by the sample drawings."""
 
-        return any(
+        if item in inspection_cache:
+            return inspection_cache[item]
+        result = any(
             12.0 <= path.width <= 30.0
             and path.height <= 0.8
             and item.x - 15.0 <= path.bounds[0] <= item.x + 1.5
             and item.y - 4.0 <= path.bounds[1] <= item.y + 0.5
             for path in graph["paths"]
         )
+        inspection_cache[item] = result
+        return result
 
     source_items: list[TextItem] = []
     consumed: set[int] = set()
@@ -295,15 +333,17 @@ def extract_drawing_entities(pdf_path: Path, page_number: int = 1) -> tuple[list
             (
                 (other_index, other)
                 for other_index, other in enumerate(texts)
-                if re.fullmatch(r"\(\d+[xX]\)", other.text.strip())
-                and abs(other.x - item.x) <= 18.0
-                and 0.0 < item.y - other.y <= 24.0
+                if re.fullmatch(r"\(?\d+[xX]\)?", other.text.strip())
+                and (
+                    (abs(other.y - item.y) <= 3.0 and 0.0 < item.x - other.x <= 45.0)
+                    or (abs(other.x - item.x) <= 18.0 and 0.0 < item.y - other.y <= 24.0)
+                )
             ),
             key=lambda pair: item.y - pair[1].y,
             default=None,
         )
         number_index, number_item = number_match
-        quantity = f" {quantity_match[1].text.strip()}" if quantity_match else ""
+        quantity = f" ({quantity_match[1].text.strip().strip('()')})" if quantity_match else ""
         source_items.append(
             TextItem(
                 text=f"R{quantity}{number_item.text.strip()}",
@@ -315,6 +355,96 @@ def extract_drawing_entities(pdf_path: Path, page_number: int = 1) -> tuple[list
         consumed.update({index, number_index})
         if quantity_match:
             consumed.add(quantity_match[0])
+
+    # Quantity prefixes are also commonly emitted separately from an otherwise
+    # complete callout ("8x" + "R14.75", or "2x" + "19.5").
+    for index, item in enumerate(texts):
+        if index in consumed:
+            continue
+        quantity_match = re.fullmatch(r"\(?([0-9]+)[xX]\)?", item.text.strip())
+        if not quantity_match:
+            continue
+        target_match = min(
+            (
+                (other_index, other)
+                for other_index, other in enumerate(texts)
+                if other_index not in consumed
+                and other_index != index
+                and re.fullmatch(r"R?[0-9]+(?:[.,][0-9]+)?", other.text.strip(), re.IGNORECASE)
+                and abs(other.y - item.y) <= 3.0
+                and 5.0 <= other.x - item.x <= 72.0
+                and not is_inspection_label(other)
+            ),
+            key=lambda candidate: candidate[1].x - item.x,
+            default=None,
+        )
+        if target_match is None:
+            continue
+        target_index, target = target_match
+        target_text = target.text.strip()
+        quantity = quantity_match.group(1)
+        combined = (
+            f"R({quantity}x){target_text[1:]}"
+            if target_text.upper().startswith("R")
+            else f"({quantity}x){target_text}"
+        )
+        source_items.append(TextItem(combined, item.x, item.y, max(item.font_size, target.font_size)))
+        consumed.update({index, target_index})
+
+    # Many CAD PDF writers emit the nominal and its tolerance as independent
+    # text objects on the same baseline, with a lower deviation immediately
+    # below the upper deviation. Reassemble those objects before parsing so
+    # values such as "9 / 0.1 / 0.15" do not become three dimensions.
+    for index, item in enumerate(texts):
+        if index in consumed or is_inspection_label(item):
+            continue
+        raw = item.text.strip()
+        if not re.fullmatch(r"[0-9]+(?:[.,][0-9]+)?", raw):
+            continue
+        nominal = _parse_number(raw)
+        if nominal is None or nominal <= 1:
+            continue
+        upper_match = min(
+            (
+                (other_index, other, float(other.text.replace(",", ".")))
+                for other_index, other in enumerate(texts)
+                if other_index not in consumed
+                and other_index != index
+                and re.fullmatch(r"[0-9]+(?:[.,][0-9]+)?", other.text.strip())
+                and float(other.text.replace(",", ".")) <= 1
+                and abs(other.y - item.y) <= 2.5
+                and 8.0 <= other.x - item.x <= max(65.0, item.font_size * 7)
+                and not is_inspection_label(other)
+            ),
+            key=lambda candidate: candidate[1].x - item.x,
+            default=None,
+        )
+        if upper_match is None:
+            continue
+        upper_index, upper_item, upper = upper_match
+        lower_match = min(
+            (
+                (other_index, other, float(other.text.replace(",", ".")))
+                for other_index, other in enumerate(texts)
+                if other_index not in consumed
+                and other_index not in {index, upper_index}
+                and re.fullmatch(r"[0-9]+(?:[.,][0-9]+)?", other.text.strip())
+                and float(other.text.replace(",", ".")) <= 1
+                and abs(other.x - upper_item.x) <= 8.0
+                and 8.0 <= upper_item.y - other.y <= 30.0
+                and not is_inspection_label(other)
+            ),
+            key=lambda candidate: upper_item.y - candidate[1].y,
+            default=None,
+        )
+        if lower_match:
+            lower_index, _, lower = lower_match
+            combined = f"{raw}+{upper:g}/-{lower:g}"
+            consumed.add(lower_index)
+        else:
+            combined = f"{raw}±{upper:g}"
+        source_items.append(TextItem(combined, item.x, item.y, item.font_size))
+        consumed.update({index, upper_index})
 
     for index, item in enumerate(texts):
         if index in consumed:
@@ -350,9 +480,26 @@ def extract_drawing_entities(pdf_path: Path, page_number: int = 1) -> tuple[list
         parsed = _parse_annotation(item.text)
         if parsed is None:
             continue
+        nominal = float(parsed.get("nominal") or 0)
+        standalone_small_number = (
+            nominal <= 1
+            and re.fullmatch(r"[+-]?[0-9]+(?:[.,][0-9]+)?", raw) is not None
+        )
+        if standalone_small_number:
+            nearby_texts = [
+                other.text.strip()
+                for other in texts
+                if other is not item
+                and abs(other.y - item.y) <= 3.0
+                and 8.0 <= other.x - item.x <= 105.0
+            ]
+            if any(text in {"A", "B", "C"} for text in nearby_texts):
+                continue
         # Exclude obvious border/title-block tokens.  Ambiguous drawing-area integers
         # are retained with lower confidence so the UI still lists them for review.
         if item.x < 55 or item.y < max(80.0, page_height * 0.08):
+            continue
+        if item.x > page_width * 0.58 and item.y < page_height * 0.13:
             continue
         if item.x > page_width * 0.82 and item.y < page_height * 0.58:
             continue

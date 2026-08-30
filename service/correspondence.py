@@ -12,6 +12,17 @@ CANDIDATE_THRESHOLD = 0.7
 NEAR_TIE_RATIO = 0.9
 
 
+def _has_verified_drawing_context(entity: dict[str, Any]) -> bool:
+    """Return whether the 2D entity is bound to a real drawing view/target.
+
+    A unique numeric hit is still only a candidate when extraction has not
+    associated the callout with a view and its referenced geometry.
+    """
+
+    view_id = str(entity.get("view_id") or "")
+    return entity.get("status") == "bound" and bool(view_id) and not view_id.endswith("UNASSIGNED")
+
+
 def _point(value: Any, fallback: Any = None) -> list[float]:
     source = value if isinstance(value, (list, tuple)) and len(value) == 3 else fallback
     return [round(float(item), 6) for item in (source or [0, 0, 0])]
@@ -166,10 +177,17 @@ def cad_measurement_features(analysis: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 def _tolerance_epsilon(entity: dict[str, Any]) -> float:
+    """Tolerance used to discover correspondence candidates, not to pass parts.
+
+    Drawing conformance is still evaluated exclusively by `_within_tolerance`
+    using an explicit drawing tolerance. A wider discovery window prevents small
+    CAD nominal/actual differences from being incorrectly reported as unmapped.
+    """
+
     tolerance = entity.get("tolerance") or {}
     explicit = [abs(float(value)) for value in (tolerance.get("lower"), tolerance.get("upper")) if value is not None]
     nominal = abs(float(entity.get("nominal") or 0))
-    return max(explicit or [0.02, nominal * 0.002])
+    return max(explicit or [0.1, nominal * 0.01])
 
 
 def _type_score(entity: dict[str, Any], feature: dict[str, Any]) -> float:
@@ -241,39 +259,58 @@ def build_manufacturing_specification(measurement_plan: dict[str, Any], analysis
             mapping = {
                 "drawing_entity_id": entity_id, "cad_feature_ids": ids, "status": "matched",
                 "method": "deterministic_rigid_pattern_match", "confidence": 0.99,
+                "verification_status": "verified_geometry",
                 "score_components": {"type": 1.0, "dimension": 1.0, "context": 1.0, "pattern_registration": 1.0},
                 "rationale": "孔数量、直径与二维阵列经过刚体不变配准后建立唯一对应。",
                 "provenance": {"created_by": "system", "reviewed_by": None},
             }
             mappings.append(mapping)
-            rows.append({"drawing_entity": entity, "mapping_status": "matched", "cad_feature_ids": ids, "candidate_count": len(ids), "measured_values": values, "result": comparison.get("result"), "method": mapping["method"], "confidence": 0.99})
+            rows.append({"drawing_entity": entity, "mapping_status": "matched", "verification_status": "verified_geometry", "cad_feature_ids": ids, "candidate_count": len(ids), "measured_values": values, "result": comparison.get("result"), "method": mapping["method"], "confidence": 0.99})
             continue
 
         candidates = [candidate for feature in cad_features if (candidate := _score_candidate(entity, feature)) is not None]
         candidates.sort(key=lambda item: (-item["score"], item["cad_feature_id"]))
         retained = [item for item in candidates if item["score"] >= candidates[0]["score"] * NEAR_TIE_RATIO] if candidates else []
         quantity = int(entity.get("quantity") or 1)
+        has_verified_context = _has_verified_drawing_context(entity)
         if retained and len(retained) == quantity:
             status, ids = "matched", [item["cad_feature_id"] for item in retained]
             values = [item["measured_value"] for item in retained]
-            checks = [_within_tolerance(entity, value) for value in values]
-            result = "fail" if False in checks else "pass" if checks and all(value is True for value in checks) else "not_evaluated"
-            confidence, rationale = min(0.95, retained[0]["score"]), "类型与尺寸一致，且精确候选数量和图纸标注数量一致。"
+            verification_status = "verified_geometry" if has_verified_context else "provisional_unique"
+            if has_verified_context:
+                checks = [_within_tolerance(entity, value) for value in values]
+                result = "fail" if False in checks else "pass" if checks and all(value is True for value in checks) else "not_evaluated"
+                confidence = min(0.95, retained[0]["score"])
+                rationale = "类型、尺寸和二维几何上下文一致，且候选数量与图纸数量一致。"
+            else:
+                result = "not_evaluated"
+                confidence = retained[0]["score"] * 0.75
+                rationale = "类型和数值仅得到一个候选；尚未绑定二维视图和引线目标，需人工确认。"
         elif retained:
             status, ids = "ambiguous", [item["cad_feature_id"] for item in retained]
+            verification_status = "needs_disambiguation"
             values, result = [item["measured_value"] for item in retained], "not_evaluated"
-            confidence, rationale = retained[0]["score"], "存在多个同分候选；保留候选并等待视图、引线或人工上下文消歧。"
+            uniqueness_penalty = 1 / math.sqrt(len(retained))
+            context_penalty = 1.0 if has_verified_context else 0.75
+            confidence = retained[0]["score"] * uniqueness_penalty * context_penalty
+            rationale = (
+                "候选数量与图纸数量不唯一；保留候选并等待人工消歧。"
+                if has_verified_context
+                else "二维标注尚未绑定视图和引线目标；数值唯一也不能确认几何对应关系。"
+            )
         else:
             status, ids, values, result, confidence = "unmapped", [], [], "not_evaluated", 0.0
+            verification_status = "unmapped"
             rationale = "没有找到同时满足几何类型与尺寸门限的三维候选。"
         mapping = {
             "drawing_entity_id": entity_id, "cad_feature_ids": ids, "status": status,
             "method": "weighted_deterministic_scoring", "confidence": round(confidence, 6),
+            "verification_status": verification_status,
             "candidates": retained, "rationale": rationale,
             "provenance": {"created_by": "system", "reviewed_by": None},
         }
         mappings.append(mapping)
-        rows.append({"drawing_entity": entity, "mapping_status": status, "cad_feature_ids": ids, "candidate_count": len(retained), "measured_values": values, "result": result, "method": mapping["method"], "confidence": mapping["confidence"]})
+        rows.append({"drawing_entity": entity, "mapping_status": status, "verification_status": verification_status, "cad_feature_ids": ids, "candidate_count": len(retained), "measured_values": values, "result": result, "method": mapping["method"], "confidence": mapping["confidence"]})
 
     summary = {
         "drawing_entities": len(entities),

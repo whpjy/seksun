@@ -14,10 +14,10 @@ from service.agent.vision import artifact_image_content, multimodal_user_content
 
 
 SYSTEM_PROMPT = """You are an auditable engineering drawing comparison agent.
-Use the provided tools to inspect the extracted 2D requirements, exact CAD features,
-and deterministic comparison evidence. Do not invent measurements. The CAD tool
+Use the provided tools to inspect the structured drawing view graph, extracted 2D requirements, exact CAD features,
+and deterministic comparison evidence. Treat model-generated view identities as hypotheses until geometric evidence supports them. Do not invent measurements. The CAD tool
 results are authoritative for geometry and tolerance decisions. Explain the public
-reason for each action concisely. Before concluding, inspect all three evidence tools.
+reason for each action concisely. Before concluding, inspect every evidence tool.
 When comparison.result is not_evaluated, operate in requirement-discovery mode:
 summarize visible/extracted annotation candidates, state that they are not yet bound
 to CAD features, do not issue pass/fail findings, and recommend which characteristic
@@ -28,6 +28,9 @@ complementary second view focused on the failed CAD feature. Set based_on_view_i
 follow-up views and explain what ambiguity the new direction resolves. For a passing
 comparison one useful non-standard view is sufficient. Never repeat an equivalent
 direction and never request more than three spatial views.
+When a drawing view and an OCCT projection are visibly the same, call
+register_drawing_view_projection so the association is persisted and deterministic
+candidate ranking is recomputed. Do not register a weak visual guess.
 After all tools are inspected, return only one valid JSON object with this shape:
 {
   "headline": "short Chinese conclusion",
@@ -353,6 +356,7 @@ def run_model_review(
 
     store.write_model_io(interactions)
     required = {
+        "inspect_drawing_view_graph",
         "inspect_drawing_requirements",
         "inspect_cad_features",
         "inspect_comparison_evidence",

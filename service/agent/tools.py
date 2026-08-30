@@ -9,6 +9,7 @@ import subprocess
 from typing import Any, Callable
 
 from service.agent.vision import rasterize_svg
+from service.agent.view_intelligence import apply_view_graph
 
 
 ToolHandler = Callable[[dict[str, Any]], dict[str, Any]]
@@ -24,15 +25,25 @@ class ComparisonToolRegistry:
         self._spatial_view_count = 0
         self._spatial_directions: list[list[float]] = []
         self._handlers: dict[str, ToolHandler] = {
+            "inspect_drawing_view_graph": self.inspect_drawing_view_graph,
             "inspect_drawing_requirements": self.inspect_drawing_requirements,
             "inspect_cad_features": self.inspect_cad_features,
             "inspect_comparison_evidence": self.inspect_comparison_evidence,
             "render_spatial_view": self.render_spatial_view,
+            "register_drawing_view_projection": self.register_drawing_view_projection,
         }
 
     @property
     def definitions(self) -> list[dict[str, Any]]:
         return [
+            {
+                "type": "function",
+                "function": {
+                    "name": "inspect_drawing_view_graph",
+                    "description": "Read the structured multimodal interpretation of drawing views, view boxes, projection hints and uncertainties.",
+                    "parameters": {"type": "object", "properties": {}, "additionalProperties": False},
+                },
+            },
             {
                 "type": "function",
                 "function": {
@@ -100,6 +111,28 @@ class ComparisonToolRegistry:
                     },
                 },
             },
+            {
+                "type": "function",
+                "function": {
+                    "name": "register_drawing_view_projection",
+                    "description": "Confirm a drawing view against a canonical or rendered OCCT projection, persist its camera frame, and recompute candidate ranking.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "drawing_view_id": {"type": "string", "maxLength": 64},
+                            "projection_view_id": {
+                                "type": "string",
+                                "maxLength": 64,
+                                "description": "front, top, right, or a rendered explore_NN id",
+                            },
+                            "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+                            "evidence": {"type": "string", "minLength": 1, "maxLength": 300},
+                        },
+                        "required": ["drawing_view_id", "projection_view_id", "confidence", "evidence"],
+                        "additionalProperties": False,
+                    },
+                },
+            },
         ]
 
     def call(self, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
@@ -122,6 +155,12 @@ class ComparisonToolRegistry:
             "vector_features": vector.get("vector_features", []),
         }
 
+    def inspect_drawing_view_graph(self, _: dict[str, Any]) -> dict[str, Any]:
+        path = self.directory / "drawing_view_graph.json"
+        if not path.is_file():
+            return {"source": "unavailable", "views": [], "uncertainties": ["drawing view graph is unavailable"]}
+        return json.loads(path.read_text(encoding="utf-8"))
+
     def inspect_cad_features(self, _: dict[str, Any]) -> dict[str, Any]:
         analysis = _read_json(self.directory, "analysis.json")
         return {
@@ -136,6 +175,74 @@ class ComparisonToolRegistry:
 
     def inspect_comparison_evidence(self, _: dict[str, Any]) -> dict[str, Any]:
         return _read_json(self.directory, "comparison.json")
+
+    def register_drawing_view_projection(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        graph_path = self.directory / "drawing_view_graph.json"
+        if not graph_path.is_file():
+            raise RuntimeError("Drawing view graph is not available")
+        drawing_view_id = str(arguments.get("drawing_view_id") or "").strip()
+        projection_view_id = str(arguments.get("projection_view_id") or "").strip().lower()
+        evidence = str(arguments.get("evidence") or "").strip()
+        try:
+            confidence = float(arguments.get("confidence"))
+        except (TypeError, ValueError) as exc:
+            raise ValueError("confidence must be a number") from exc
+        if not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", drawing_view_id):
+            raise ValueError("drawing_view_id contains unsupported characters")
+        if not re.fullmatch(r"(?:front|top|right|explore_[0-9]{2})", projection_view_id):
+            raise ValueError("projection_view_id must be front, top, right, or explore_NN")
+        if not 0 <= confidence <= 1:
+            raise ValueError("confidence must be between 0 and 1")
+        if not evidence or len(evidence) > 300:
+            raise ValueError("evidence must contain 1 to 300 characters")
+
+        graph = json.loads(graph_path.read_text(encoding="utf-8"))
+        view = next(
+            (item for item in graph.get("views") or [] if item.get("id") == drawing_view_id),
+            None,
+        )
+        if view is None:
+            raise ValueError("drawing_view_id does not exist in the view graph")
+        frames = {
+            "front": ([0.0, -1.0, 0.0], [1.0, 0.0, 0.0]),
+            "top": ([0.0, 0.0, 1.0], [1.0, 0.0, 0.0]),
+            "right": ([-1.0, 0.0, 0.0], [0.0, -1.0, 0.0]),
+        }
+        if projection_view_id in frames:
+            direction, x_direction = frames[projection_view_id]
+            view["matched_projection_id"] = projection_view_id
+            view.pop("matched_spatial_view_id", None)
+        else:
+            request_path = self.directory / "spatial" / projection_view_id / "request.json"
+            if not request_path.is_file():
+                raise ValueError("projection_view_id does not reference a rendered spatial view")
+            rendered_views = _read_json(request_path.parent, "request.json").get("views") or []
+            rendered = next((item for item in rendered_views if item.get("id") == projection_view_id), None)
+            if rendered is None:
+                raise ValueError("rendered spatial view metadata is invalid")
+            direction = self._vector(rendered, "direction")
+            x_direction = self._vector(rendered, "x_direction")
+            view["matched_projection_id"] = None
+            view["matched_spatial_view_id"] = projection_view_id
+        view.update(
+            {
+                "observation_direction": direction,
+                "x_direction": x_direction,
+                "confidence": round(confidence, 4),
+                "registration_evidence": evidence,
+                "registration_source": "agent_visual_confirmation",
+            }
+        )
+        if graph.get("source") != "multimodal_model":
+            graph["source"] = "hybrid_agent_registered"
+        graph["registration_count"] = int(graph.get("registration_count") or 0) + 1
+        graph_path.write_text(json.dumps(graph, ensure_ascii=False, indent=2), encoding="utf-8")
+        comparison = apply_view_graph(self.directory, graph)
+        return {
+            "drawing_view": view,
+            "comparison_summary": (comparison.get("manufacturing_specification") or {}).get("summary", {}),
+            "view_intelligence": comparison.get("view_intelligence", {}),
+        }
 
     @staticmethod
     def _vector(arguments: dict[str, Any], name: str) -> list[float]:

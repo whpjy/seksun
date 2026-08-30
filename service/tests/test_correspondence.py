@@ -1,4 +1,4 @@
-from service.correspondence import build_manufacturing_specification
+from service.correspondence import build_manufacturing_specification, cad_measurement_features
 
 
 def test_near_tie_candidates_are_retained_for_review():
@@ -137,3 +137,66 @@ def test_small_nominal_difference_is_a_candidate_but_not_a_pass_without_toleranc
     assert row["verification_status"] == "provisional_unique"
     assert row["measured_values"] == [15.96]
     assert row["result"] == "not_evaluated"
+
+
+def test_leader_position_disambiguates_equal_numeric_candidates_conservatively():
+    plan = {
+        "drawing_entities": [
+            {
+                "id": "D2-001",
+                "semantic_type": "linear_dimension",
+                "nominal": 10.0,
+                "quantity": 1,
+                "view_id": "PAGE_1_REGION_01",
+                "status": "context_bound",
+                "leader_target_pdf": [0, 0],
+                "view_region_pdf": [0, 0, 100, 100],
+                "view_region_size": 3,
+                "context_confidence": 1.0,
+            }
+        ],
+        "measurements": [],
+    }
+    analysis = {
+        "measurements": {
+            "bounding_box": {
+                "min": [0, 0, 0],
+                "max": [100, 20, 100],
+                "size": [100, 20, 100],
+            }
+        },
+        "linear_edge_features": [
+            {"id": "LEFT", "length": 10, "center": [0, 0, 0], "direction": [1, 0, 0]},
+            {"id": "RIGHT", "length": 10, "center": [100, 0, 100], "direction": [1, 0, 0]},
+        ],
+    }
+
+    specification = build_manufacturing_specification(plan, analysis, {"features": []})
+
+    mapping = specification["mappings"][0]
+    assert mapping["status"] == "matched"
+    assert mapping["verification_status"] == "provisional_spatial"
+    assert mapping["cad_feature_ids"] == ["LEFT"]
+    assert mapping["candidates"][0]["score_components"]["projection_hint"] == "front"
+
+
+def test_torus_ids_distinguish_radius_roles_and_duplicate_faces_are_merged():
+    analysis = {
+        "radius_pair_analysis": {
+            "torus_patches": [
+                {"face_id": "F1", "center": [10, 0, 5], "axis": [0, 1, 0], "major_radius": 23.4, "minor_radius": 2.4},
+                {"face_id": "F2", "center": [10, 0, 5], "axis": [0, -1, 0], "major_radius": 23.4, "minor_radius": 5.4},
+            ]
+        }
+    }
+
+    features = cad_measurement_features(analysis)
+    major = [item for item in features if item.get("radius_role") == "major"]
+    minor = [item for item in features if item.get("radius_role") == "minor"]
+
+    assert len(major) == 1
+    assert major[0]["id"].endswith("-MAJOR")
+    assert major[0]["source_ids"] == ["F1", "F2"]
+    assert major[0]["evidence"] == 2
+    assert len(minor) == 2
+    assert all(item["id"].endswith("-MINOR") for item in minor)

@@ -8,8 +8,10 @@ from pypdf.generic import DecodedStreamObject, DictionaryObject, NameObject
 from service import main
 from service.pdf_extraction import (
     PDF_POINTS_PER_MM,
+    bind_drawing_context,
     extract_c10_from_pdf,
     extract_drawing_entities,
+    extract_page_graph,
 )
 
 
@@ -177,3 +179,40 @@ def test_unsupported_drawing_enters_requirement_discovery(tmp_path, monkeypatch)
     plan = json.loads((output / "measurement_plan.json").read_text(encoding="utf-8"))
     assert plan["scope"]["mode"] == "requirement_discovery"
     assert plan["measurements"] == []
+
+
+def test_leader_line_adds_conservative_drawing_context(tmp_path):
+    pdf = tmp_path / "leader.pdf"
+    writer = PdfWriter()
+    page = writer.add_blank_page(width=400, height=300)
+    font = DictionaryObject(
+        {
+            NameObject("/Type"): NameObject("/Font"),
+            NameObject("/Subtype"): NameObject("/Type1"),
+            NameObject("/BaseFont"): NameObject("/Helvetica"),
+        }
+    )
+    page[NameObject("/Resources")] = DictionaryObject(
+        {NameObject("/Font"): DictionaryObject({NameObject("/F1"): writer._add_object(font)})}
+    )
+    content = DecodedStreamObject()
+    content.set_data(
+        b"BT /F1 10 Tf 1 0 0 1 100 220 Tm (25) Tj ET\n"
+        b"118 220 m 155 190 l S\n"
+        b"BT /F1 10 Tf 1 0 0 1 180 220 Tm (30) Tj ET\n"
+        b"198 220 m 235 190 l S\n"
+        b"BT /F1 10 Tf 1 0 0 1 165 120 Tm (40) Tj ET\n"
+        b"183 120 m 200 90 l S\n"
+    )
+    page[NameObject("/Contents")] = writer._add_object(content)
+    with pdf.open("wb") as stream:
+        writer.write(stream)
+
+    graph = extract_page_graph(pdf)
+    entities, _ = extract_drawing_entities(pdf)
+    bind_drawing_context(graph, entities)
+
+    assert len(entities) >= 2
+    assert all(item["status"] == "context_bound" for item in entities)
+    assert all(item["view_id"].startswith("PAGE_1_REGION_") for item in entities)
+    assert entities[0]["leader_target_pdf"] == pytest.approx([155, 190])

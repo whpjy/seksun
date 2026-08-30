@@ -44,11 +44,13 @@ class QwenModelClient:
         payload = {
             "model": model,
             "messages": messages,
-            "tools": tools,
-            "tool_choice": "auto",
             "temperature": 0.1,
             "stream": False,
         }
+        if tools:
+            payload.update({"tools": tools, "tool_choice": "auto"})
+        else:
+            payload["response_format"] = {"type": "json_object"}
         with httpx.Client(timeout=self.timeout) as client:
             response = client.post(
                 f"{self.base_url}/chat/completions",
@@ -73,6 +75,7 @@ class QwenModelClient:
     @staticmethod
     def _mock_reply(messages: list[dict[str, Any]], round_index: int) -> ModelReply:
         tools = [
+            "inspect_drawing_view_graph",
             "inspect_drawing_requirements",
             "inspect_cad_features",
             "inspect_comparison_evidence",
@@ -89,7 +92,7 @@ class QwenModelClient:
                         "x_direction": [1, 1, 0],
                         "purpose": "生成轴测方向投影以复核孔组空间布局",
                     }
-                    if round_index == 3
+                    if round_index == 4
                     else {
                         "direction": [-1, -1, 0.45],
                         "x_direction": [1, -1, 0],

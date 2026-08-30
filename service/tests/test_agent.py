@@ -58,13 +58,14 @@ def test_mock_agent_inspects_all_required_evidence(tmp_path, monkeypatch):
         "inspect_cad_features",
         "inspect_comparison_evidence",
         "inspect_drawing_requirements",
+        "inspect_drawing_view_graph",
         "render_spatial_view",
     ]
     events = store.read_events()
-    assert [event["type"] for event in events].count("tool.completed") == 5
+    assert [event["type"] for event in events].count("tool.completed") == 6
     assert events[-1]["type"] == "model.completed"
     model_io = json.loads(store.model_io_path.read_text(encoding="utf-8"))
-    assert len(model_io) == 6
+    assert len(model_io) == 7
     assert "api_key" not in json.dumps(model_io).lower()
     assert "reasoning_content" not in json.dumps(model_io).lower()
     assert result["structured_review"]["findings"][0]["result"] == "fail"

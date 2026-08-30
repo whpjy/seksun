@@ -10,6 +10,7 @@ DIMENSION_WEIGHT = 0.4
 CONTEXT_WEIGHT = 0.2
 CANDIDATE_THRESHOLD = 0.7
 NEAR_TIE_RATIO = 0.9
+CONTEXT_NEAR_TIE_RATIO = 0.99
 
 
 def _has_verified_drawing_context(entity: dict[str, Any]) -> bool:
@@ -57,6 +58,102 @@ def _model_bounds(analysis: dict[str, Any]) -> tuple[list[float], list[float], l
     maximum = _point(box.get("max"))
     size = _point(box.get("size"), [maximum[i] - minimum[i] for i in range(3)])
     return minimum, maximum, size
+
+
+def _projection_context_score(
+    entity: dict[str, Any],
+    feature: dict[str, Any],
+    model_bounds: tuple[list[float], list[float], list[float]],
+) -> tuple[float, str] | None:
+    """Score a numeric candidate using its leader target and inferred view shape.
+
+    This is deliberately a ranking signal, not a verified binding.  A region must
+    contain several independently traced leaders before it can influence matching.
+    """
+
+    target = entity.get("leader_target_pdf") or []
+    region = entity.get("view_region_pdf") or []
+    if (
+        entity.get("status") not in {"context_bound", "ai_view_bound"}
+        or int(entity.get("view_region_size") or 0) < 3
+        or len(target) != 2
+        or len(region) != 4
+    ):
+        return None
+    region_width = float(region[2]) - float(region[0])
+    region_height = float(region[3]) - float(region[1])
+    if region_width < 20 or region_height < 20:
+        return None
+
+    minimum, maximum, sizes = model_bounds
+    if max(sizes or [0]) <= 0:
+        return None
+    center = _point(feature.get("center"))
+    direction_hint = entity.get("view_direction_hint")
+    x_hint = entity.get("view_x_direction_hint")
+    if isinstance(direction_hint, list) and isinstance(x_hint, list):
+        direction = _axis(direction_hint)
+        x_direction = _axis(x_hint)
+        dot_dx = sum(direction[i] * x_direction[i] for i in range(3))
+        x_direction = [x_direction[i] - direction[i] * dot_dx for i in range(3)]
+        x_length = math.sqrt(sum(value * value for value in x_direction))
+        if x_length <= 1e-8:
+            return None
+        x_direction = [value / x_length for value in x_direction]
+        y_direction = [
+            direction[1] * x_direction[2] - direction[2] * x_direction[1],
+            direction[2] * x_direction[0] - direction[0] * x_direction[2],
+            direction[0] * x_direction[1] - direction[1] * x_direction[0],
+        ]
+        corners = [
+            [x, y, z]
+            for x in (minimum[0], maximum[0])
+            for y in (minimum[1], maximum[1])
+            for z in (minimum[2], maximum[2])
+        ]
+        projected_x = [sum(point[i] * x_direction[i] for i in range(3)) for point in corners]
+        projected_y = [sum(point[i] * y_direction[i] for i in range(3)) for point in corners]
+        center_x = sum(center[i] * x_direction[i] for i in range(3))
+        center_y = sum(center[i] * y_direction[i] for i in range(3))
+        model_x = (center_x - min(projected_x)) / max(max(projected_x) - min(projected_x), 1e-9)
+        model_y = (center_y - min(projected_y)) / max(max(projected_y) - min(projected_y), 1e-9)
+        view_name = str(entity.get("matched_projection_id") or entity.get("view_type") or "dynamic")
+        alignment = abs(sum(_axis(feature.get("axis"))[i] * direction[i] for i in range(3)))
+    else:
+        frames = {
+            "front": (0, 2, False),
+            "top": (0, 1, False),
+            "right": (1, 2, True),
+        }
+        region_aspect = region_width / region_height
+        viable = [
+            (abs(math.log(region_aspect / (sizes[x_axis] / sizes[y_axis]))), name, x_axis, y_axis, flip_x)
+            for name, (x_axis, y_axis, flip_x) in frames.items()
+            if sizes[x_axis] > 1e-9 and sizes[y_axis] > 1e-9
+        ]
+        if not viable:
+            return None
+        _, view_name, x_axis, y_axis, flip_x = min(viable)
+        model_x = (center[x_axis] - minimum[x_axis]) / sizes[x_axis]
+        model_y = (center[y_axis] - minimum[y_axis]) / sizes[y_axis]
+        if flip_x:
+            model_x = 1 - model_x
+        normal_axis = ({0, 1, 2} - {x_axis, y_axis}).pop()
+        alignment = abs(_axis(feature.get("axis"))[normal_axis])
+    drawing_x = (float(target[0]) - float(region[0])) / region_width
+    drawing_y = (float(target[1]) - float(region[1])) / region_height
+    distance = math.hypot(model_x - drawing_x, model_y - drawing_y) / math.sqrt(2)
+    spatial = max(0.0, 1.0 - distance)
+
+    # Features measured in a view normally lie in its image plane; cylindrical
+    # diameters/radii are the exception and are strongest when viewed along axis.
+    semantic = entity.get("semantic_type")
+    if semantic in {"diameter", "radius"}:
+        visibility = 1.0 if alignment >= 0.8 else 0.55
+    else:
+        visibility = 1.0 if alignment <= 0.8 else 0.6
+    confidence = float(entity.get("context_confidence") or 0.5)
+    return max(0.0, min(1.0, spatial * visibility * confidence)), view_name
 
 
 def cad_measurement_features(analysis: dict[str, Any]) -> list[dict[str, Any]]:
@@ -164,15 +261,39 @@ def cad_measurement_features(analysis: dict[str, Any]) -> list[dict[str, Any]]:
                 radius=radius, side=group.get("side"), evidence=int(group.get("faces") or 1),
                 source_ids=[f"bend-group-{index}"],
             ))
+    torus_features: list[dict[str, Any]] = []
     for index, patch in enumerate(radius_analysis.get("torus_patches") or [], 1):
-        for radius_name in ("major_radius", "minor_radius"):
+        for radius_name, suffix in (("major_radius", "MAJOR"), ("minor_radius", "MINOR")):
             radius = float(patch.get(radius_name) or 0)
             if radius > 0:
-                features.append(_feature(
-                    f"TORUS-{index:03d}-{radius_name[0].upper()}", "torus_radius", radius,
+                torus_features.append(_feature(
+                    f"TORUS-{index:03d}-{suffix}", "torus_radius", radius,
                     patch.get("center") or model_center, patch.get("axis") or "Z",
-                    radius=radius, source_ids=[str(patch.get("face_id"))],
+                    radius=radius, radius_role=suffix.lower(),
+                    source_ids=[str(patch.get("face_id"))],
                 ))
+    # One physical blend can be split into several B-Rep faces or duplicated by
+    # touching assembly bodies.  Quantity callouts count spatial locations, not
+    # raw faces, so merge torus evidence with the same radius, center and axis.
+    grouped_tori: dict[tuple[Any, ...], dict[str, Any]] = {}
+    for feature in torus_features:
+        key = (
+            round(float(feature["value"]), 4),
+            *(round(float(value), 4) for value in feature["center"]),
+            *(round(abs(float(value)), 4) for value in feature["axis"]),
+            feature.get("radius_role"),
+        )
+        existing = grouped_tori.get(key)
+        if existing is None:
+            feature["merged_feature_ids"] = [feature["id"]]
+            grouped_tori[key] = feature
+            continue
+        existing["source_ids"] = sorted(
+            set(existing.get("source_ids") or []) | set(feature.get("source_ids") or [])
+        )
+        existing["merged_feature_ids"].append(feature["id"])
+        existing["evidence"] = len(existing["source_ids"])
+    features.extend(grouped_tori.values())
     return features
 
 
@@ -187,7 +308,10 @@ def _tolerance_epsilon(entity: dict[str, Any]) -> float:
     tolerance = entity.get("tolerance") or {}
     explicit = [abs(float(value)) for value in (tolerance.get("lower"), tolerance.get("upper")) if value is not None]
     nominal = abs(float(entity.get("nominal") or 0))
-    return max(explicit or [0.1, nominal * 0.01])
+    # STEP assemblies often contain formed/assembled geometry rather than exact
+    # drawing nominals.  Use a wider discovery window so those values remain
+    # reviewable candidates; pass/fail still uses only the explicit tolerance.
+    return max(explicit or [0.2, nominal * 0.02])
 
 
 def _type_score(entity: dict[str, Any], feature: dict[str, Any]) -> float:
@@ -212,7 +336,11 @@ def _measured_value(entity: dict[str, Any], feature: dict[str, Any]) -> float:
     return float(feature["value"])
 
 
-def _score_candidate(entity: dict[str, Any], feature: dict[str, Any]) -> dict[str, Any] | None:
+def _score_candidate(
+    entity: dict[str, Any],
+    feature: dict[str, Any],
+    model_bounds: tuple[list[float], list[float], list[float]],
+) -> dict[str, Any] | None:
     type_score, nominal = _type_score(entity, feature), entity.get("nominal")
     if type_score == 0 or nominal is None:
         return None
@@ -221,14 +349,27 @@ def _score_candidate(entity: dict[str, Any], feature: dict[str, Any]) -> dict[st
     if delta > epsilon:
         return None
     dimension_score = max(0.8, 1 - delta / max(epsilon, 1e-9) * 0.2)
-    context_score = min(0.8, 0.5 + math.log2(max(int(feature.get("evidence") or 1), 1)) * 0.1)
+    evidence_score = min(0.8, 0.5 + math.log2(max(int(feature.get("evidence") or 1), 1)) * 0.1)
+    projection_context = _projection_context_score(entity, feature, model_bounds)
+    context_score = (
+        0.25 * evidence_score + 0.75 * projection_context[0]
+        if projection_context is not None
+        else evidence_score
+    )
     heuristic = 0.1 if entity.get("diameter_symbol_present") else 0.0
     score = TYPE_WEIGHT * type_score + DIMENSION_WEIGHT * dimension_score + CONTEXT_WEIGHT * context_score + heuristic
     if score < CANDIDATE_THRESHOLD:
         return None
     return {
         "cad_feature_id": feature["id"], "score": round(score, 6),
-        "score_components": {"type": type_score, "dimension": round(dimension_score, 6), "context": round(context_score, 6), "heuristic": heuristic},
+        "score_components": {
+            "type": type_score,
+            "dimension": round(dimension_score, 6),
+            "context": round(context_score, 6),
+            "spatial": round(projection_context[0], 6) if projection_context else None,
+            "projection_hint": projection_context[1] if projection_context else None,
+            "heuristic": heuristic,
+        },
         "measured_value": round(measured, 6), "dimension_delta": round(delta, 6),
     }
 
@@ -250,6 +391,7 @@ def build_manufacturing_specification(measurement_plan: dict[str, Any], analysis
     measurements = measurement_plan.get("measurements") or []
     specialized_id = (measurements[0].get("source") or {}).get("drawing_entity_id") if measurements else None
     specialized = comparison.get("features") or []
+    model_bounds = _model_bounds(analysis)
 
     for entity in entities:
         entity_id = entity["id"]
@@ -268,15 +410,39 @@ def build_manufacturing_specification(measurement_plan: dict[str, Any], analysis
             rows.append({"drawing_entity": entity, "mapping_status": "matched", "verification_status": "verified_geometry", "cad_feature_ids": ids, "candidate_count": len(ids), "measured_values": values, "result": comparison.get("result"), "method": mapping["method"], "confidence": 0.99})
             continue
 
-        candidates = [candidate for feature in cad_features if (candidate := _score_candidate(entity, feature)) is not None]
+        candidates = [
+            candidate
+            for feature in cad_features
+            if (candidate := _score_candidate(entity, feature, model_bounds)) is not None
+        ]
         candidates.sort(key=lambda item: (-item["score"], item["cad_feature_id"]))
-        retained = [item for item in candidates if item["score"] >= candidates[0]["score"] * NEAR_TIE_RATIO] if candidates else []
+        has_spatial_context = bool(
+            candidates
+            and candidates[0].get("score_components", {}).get("spatial") is not None
+        )
+        near_tie_ratio = CONTEXT_NEAR_TIE_RATIO if has_spatial_context else NEAR_TIE_RATIO
         quantity = int(entity.get("quantity") or 1)
+        near_ties = [
+            item
+            for item in candidates
+            if item["score"] >= candidates[0]["score"] * near_tie_ratio
+        ] if candidates else []
+        # A quantity callout describes a feature set. Keep at least that many
+        # ranked spatial candidates; otherwise a valid 4x pattern can be cut to
+        # one or two candidates merely because its projected positions differ.
+        retained_count = max(len(near_ties), min(quantity, len(candidates)))
+        retained = candidates[:retained_count]
         has_verified_context = _has_verified_drawing_context(entity)
         if retained and len(retained) == quantity:
             status, ids = "matched", [item["cad_feature_id"] for item in retained]
             values = [item["measured_value"] for item in retained]
-            verification_status = "verified_geometry" if has_verified_context else "provisional_unique"
+            verification_status = (
+                "verified_geometry"
+                if has_verified_context
+                else "provisional_spatial"
+                if has_spatial_context
+                else "provisional_unique"
+            )
             if has_verified_context:
                 checks = [_within_tolerance(entity, value) for value in values]
                 result = "fail" if False in checks else "pass" if checks and all(value is True for value in checks) else "not_evaluated"
@@ -320,7 +486,12 @@ def build_manufacturing_specification(measurement_plan: dict[str, Any], analysis
     }
     return {
         "schema_version": "1.1.0", "method": "deterministic_first_context_aware_correspondence",
-        "scoring": {"weights": {"type": TYPE_WEIGHT, "dimension": DIMENSION_WEIGHT, "context": CONTEXT_WEIGHT}, "candidate_threshold": CANDIDATE_THRESHOLD, "near_tie_ratio": NEAR_TIE_RATIO},
+        "scoring": {
+            "weights": {"type": TYPE_WEIGHT, "dimension": DIMENSION_WEIGHT, "context": CONTEXT_WEIGHT},
+            "candidate_threshold": CANDIDATE_THRESHOLD,
+            "near_tie_ratio": NEAR_TIE_RATIO,
+            "context_near_tie_ratio": CONTEXT_NEAR_TIE_RATIO,
+        },
         "drawing_entities": entities, "cad_features": cad_features, "mappings": mappings,
         "comparison_rows": rows,
         "unmapped_entity_ids": [item["drawing_entity_id"] for item in mappings if item["status"] == "unmapped"],

@@ -27,6 +27,7 @@ class VectorPath:
     signature: str
     paint_operator: str
     bounds: tuple[float, float, float, float]
+    points: tuple[tuple[float, float], ...] = ()
 
     @property
     def width(self) -> float:
@@ -128,6 +129,7 @@ def extract_page_graph(pdf_path: Path, page_number: int = 1) -> dict:
                         signature="".join(command for command, _ in subpath),
                         paint_operator=operator.decode("ascii"),
                         bounds=(min(x_values), min(y_values), max(x_values), max(y_values)),
+                        points=tuple(points),
                     )
                 )
             current_path = []
@@ -144,6 +146,204 @@ def extract_page_graph(pdf_path: Path, page_number: int = 1) -> dict:
         "texts": texts,
         "paths": paths,
     }
+
+
+def _distance_to_box(
+    point: tuple[float, float],
+    bounds: tuple[float, float, float, float],
+) -> float:
+    x, y = point
+    left, bottom, right, top = bounds
+    dx = max(left - x, 0.0, x - right)
+    dy = max(bottom - y, 0.0, y - top)
+    return math.hypot(dx, dy)
+
+
+def _leader_target(
+    entity: dict[str, Any],
+    segments: list[tuple[tuple[float, float], tuple[float, float], float]],
+    endpoint_index: dict[tuple[int, int], set[int]],
+    page_width: float,
+    page_height: float,
+) -> tuple[list[float], float] | None:
+    """Follow linework adjacent to a callout and return its remote endpoint.
+
+    Engineering PDF writers normally emit leaders and dimension shoulders as
+    individual ``m/l`` subpaths.  We deliberately ignore curves, page borders and
+    very short glyph strokes, then walk the small endpoint graph that touches the
+    annotation box.  The result is contextual evidence only; it is never treated
+    as a verified conformance binding.
+    """
+
+    raw_bounds = entity.get("bbox_pdf") or []
+    if len(raw_bounds) != 4:
+        return None
+    bounds = tuple(float(value) for value in raw_bounds)
+    diagonal = math.hypot(page_width, page_height)
+    endpoint_tolerance = max(2.5, diagonal * 0.0012)
+    seed_tolerance = max(12.0, float(entity.get("font_size") or 0) * 1.5)
+
+    seeds = {
+        index
+        for index, (first, second, _) in enumerate(segments)
+        if min(_distance_to_box(first, bounds), _distance_to_box(second, bounds))
+        <= seed_tolerance
+    }
+    if not seeds:
+        return None
+
+    connected = set(seeds)
+    frontier = sorted(seeds, reverse=True)
+    endpoints = [point for index in sorted(seeds) for point in segments[index][:2]]
+    while frontier and len(connected) < 24:
+        current = frontier.pop()
+        current_points = segments[current][:2]
+        neighbor_indices: set[int] = set()
+        for point in current_points:
+            cell_x = round(point[0] / endpoint_tolerance)
+            cell_y = round(point[1] / endpoint_tolerance)
+            for offset_x in (-1, 0, 1):
+                for offset_y in (-1, 0, 1):
+                    neighbor_indices.update(
+                        endpoint_index.get((cell_x + offset_x, cell_y + offset_y), set())
+                    )
+        for index in sorted(neighbor_indices):
+            if index in connected:
+                continue
+            segment = segments[index]
+            if any(
+                math.dist(left, right) <= endpoint_tolerance
+                for left in current_points
+                for right in segment[:2]
+            ):
+                connected.add(index)
+                frontier.append(index)
+                endpoints.extend(segment[:2])
+
+    anchor = (
+        (bounds[0] + bounds[2]) / 2,
+        (bounds[1] + bounds[3]) / 2,
+    )
+    target = max(endpoints, key=lambda point: math.dist(anchor, point))
+    distance = math.dist(anchor, target)
+    if distance < max(18.0, diagonal * 0.008):
+        return None
+    confidence = min(0.9, 0.5 + distance / max(diagonal * 0.15, 1.0) * 0.35)
+    return [round(target[0], 3), round(target[1], 3)], round(confidence, 3)
+
+
+def bind_drawing_context(
+    graph: dict[str, Any],
+    entities: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Attach conservative leader targets and local drawing-region identities."""
+
+    page_width = float(graph["width"])
+    page_height = float(graph["height"])
+    paths: list[VectorPath] = graph["paths"]
+    diagonal = math.hypot(page_width, page_height)
+    endpoint_tolerance = max(2.5, diagonal * 0.0012)
+    segments: list[tuple[tuple[float, float], tuple[float, float], float]] = []
+    for path in paths:
+        if path.signature != "ml" or len(path.points) != 2:
+            continue
+        first, second = path.points
+        length = math.dist(first, second)
+        if length < 4.0 or length > diagonal * 0.35:
+            continue
+        if path.width > page_width * 0.3 or path.height > page_height * 0.3:
+            continue
+        segments.append((first, second, length))
+    endpoint_index: dict[tuple[int, int], set[int]] = {}
+    for index, segment in enumerate(segments):
+        for point in segment[:2]:
+            cell = (
+                round(point[0] / endpoint_tolerance),
+                round(point[1] / endpoint_tolerance),
+            )
+            endpoint_index.setdefault(cell, set()).add(index)
+    bound: list[tuple[dict[str, Any], list[float], float]] = []
+    for entity in entities:
+        target = _leader_target(
+            entity,
+            segments,
+            endpoint_index,
+            page_width,
+            page_height,
+        )
+        if target is None:
+            continue
+        point, confidence = target
+        entity["leader_target_pdf"] = point
+        entity["context_confidence"] = confidence
+        bound.append((entity, point, confidence))
+
+    # Leader endpoints belonging to one projected view form compact spatial
+    # groups.  The radius is deliberately smaller than the separation between
+    # normal orthographic views on an engineering sheet.
+    radius = min(page_width, page_height) * 0.07
+    remaining = set(range(len(bound)))
+    groups: list[set[int]] = []
+    while remaining:
+        seed = min(remaining)
+        remaining.remove(seed)
+        group = {seed}
+        frontier = [seed]
+        while frontier:
+            current = frontier.pop()
+            nearby = {
+                index
+                for index in remaining
+                if math.dist(bound[current][1], bound[index][1]) <= radius
+            }
+            remaining -= nearby
+            group |= nearby
+            frontier.extend(sorted(nearby, reverse=True))
+        groups.append(group)
+
+    core_groups = [group for group in groups if len(group) >= 3]
+    small_groups = [group for group in groups if len(group) < 3]
+    if core_groups:
+        detached: list[set[int]] = []
+        for group in small_groups:
+            closest = min(
+                (
+                    (
+                        min(
+                            math.dist(bound[left][1], bound[right][1])
+                            for left in group
+                            for right in core
+                        ),
+                        core,
+                    )
+                    for core in core_groups
+                ),
+                key=lambda item: item[0],
+            )
+            if closest[0] <= radius * 2.2:
+                closest[1].update(group)
+            else:
+                detached.append(group)
+        groups = core_groups + detached
+
+    groups.sort(
+        key=lambda group: (
+            -sum(bound[index][1][1] for index in group) / len(group),
+            sum(bound[index][1][0] for index in group) / len(group),
+        )
+    )
+    for number, group in enumerate(groups, 1):
+        xs = [bound[index][1][0] for index in group]
+        ys = [bound[index][1][1] for index in group]
+        region_id = f"PAGE_1_REGION_{number:02d}"
+        region_bounds = [min(xs), min(ys), max(xs), max(ys)]
+        for index in group:
+            entity = bound[index][0]
+            entity["view_id"] = region_id
+            entity["status"] = "context_bound"
+            entity["view_region_pdf"] = [round(value, 3) for value in region_bounds]
+            entity["view_region_size"] = len(group)
+    return entities
 
 
 def _parse_hole_callout(text: str) -> tuple[int, float, float] | None:
@@ -594,6 +794,7 @@ def _ordered_centers(paths: list[VectorPath], row_tolerance: float) -> list[tupl
 def extract_c10_from_pdf(pdf_path: Path) -> tuple[dict, dict, dict]:
     graph = extract_page_graph(pdf_path)
     drawing_entities, entity_diagnostics = extract_drawing_entities(pdf_path)
+    bind_drawing_context(graph, drawing_entities)
     texts: list[TextItem] = graph["texts"]
     paths: list[VectorPath] = graph["paths"]
     callout_candidates = [
@@ -743,6 +944,16 @@ def extract_c10_from_pdf(pdf_path: Path) -> tuple[dict, dict, dict]:
         "hole_callout_candidates": len(callout_candidates),
         "matched_circle_count": len(circles),
         "drawing_entity_extraction": entity_diagnostics,
+        "context_binding": {
+            "leader_targets": sum("leader_target_pdf" in item for item in drawing_entities),
+            "assigned_regions": len(
+                {
+                    item["view_id"]
+                    for item in drawing_entities
+                    if item.get("status") == "context_bound"
+                }
+            ),
+        },
         "selected_callout_text": callout.text,
         "selected_scale_text": scale_item.text,
     }
@@ -756,6 +967,7 @@ def discover_drawing_requirements(
     """Collect bounded annotation candidates when no supported C10 template exists."""
     graph = extract_page_graph(pdf_path)
     drawing_entities, entity_diagnostics = extract_drawing_entities(pdf_path)
+    bind_drawing_context(graph, drawing_entities)
     texts: list[TextItem] = graph["texts"]
     paths: list[VectorPath] = graph["paths"]
     candidates: list[dict[str, Any]] = []
@@ -849,6 +1061,16 @@ def discover_drawing_requirements(
         "mode": "requirement_discovery",
         "fallback_reason": extraction_error,
         "drawing_entity_extraction": entity_diagnostics,
+        "context_binding": {
+            "leader_targets": sum("leader_target_pdf" in item for item in drawing_entities),
+            "assigned_regions": len(
+                {
+                    item["view_id"]
+                    for item in drawing_entities
+                    if item.get("status") == "context_bound"
+                }
+            ),
+        },
     }
     return measurement_plan, vector_extraction, diagnostics
 

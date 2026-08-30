@@ -24,6 +24,7 @@ from dotenv import load_dotenv
 from service.agent.events import AgentRunStore, TERMINAL_STATUSES
 from service.agent.runtime import run_model_review
 from service.agent.vision import prepare_visual_observations
+from service.agent.view_intelligence import apply_view_graph, understand_drawing_views
 from service.comparison import compare_c10_from_analysis
 from service.correspondence import build_manufacturing_specification
 from service.pdf_extraction import discover_drawing_requirements, extract_c10_from_pdf
@@ -55,6 +56,8 @@ ALLOWED_RESULTS = {
     "agent_run.json",
     "agent_events.jsonl",
     "model_io.json",
+    "drawing_view_graph.json",
+    "view_model_io.json",
     "manufacturing_specification.json",
     "model.stl",
 }
@@ -67,6 +70,8 @@ ROOT_RESULTS = {
     "agent_run.json",
     "agent_events.jsonl",
     "model_io.json",
+    "drawing_view_graph.json",
+    "view_model_io.json",
     "manufacturing_specification.json",
     "model.stl",
 }
@@ -432,6 +437,8 @@ def agent_result_links(job_id: str) -> dict:
         "three_views": file_url(job_id, "three_views.svg"),
         "manifest": file_url(job_id, "views.json"),
         "model_io": file_url(job_id, "model_io.json"),
+        "drawing_view_graph": file_url(job_id, "drawing_view_graph.json"),
+        "view_model_io": file_url(job_id, "view_model_io.json"),
         "model": file_url(job_id, "model.stl"),
         "manufacturing_specification": file_url(job_id, "manufacturing_specification.json"),
         "archive": f"/api/v1/jobs/{job_id}/download",
@@ -474,6 +481,7 @@ async def execute_agent_run(
                 "discovery": comparison.get("discovery", {}),
             },
         )
+        view_graph: dict = {}
         try:
             visual_artifacts = await asyncio.to_thread(
                 prepare_visual_observations, directory, pdf_path
@@ -494,8 +502,37 @@ async def execute_agent_run(
                 "多模态观察图像生成失败，AI将仅使用结构化证据",
                 data={"error": str(exc)},
             )
+        try:
+            view_graph = await asyncio.to_thread(understand_drawing_views, directory)
+            if view_graph.get("source") == "multimodal_model":
+                comparison = await asyncio.to_thread(
+                    apply_view_graph, directory, view_graph
+                )
+            store.emit(
+                "vision.views_understood",
+                "多模态模型已生成可审计的图纸视图关系图",
+                data={
+                    "source": view_graph.get("source"),
+                    "model": view_graph.get("model"),
+                    "projection_method": view_graph.get("projection_method"),
+                    "view_count": len(view_graph.get("views") or []),
+                    "view_intelligence": comparison.get("view_intelligence", {}),
+                    "uncertainties": view_graph.get("uncertainties", []),
+                },
+                model=view_graph.get("model"),
+            )
+        except Exception as exc:
+            store.emit(
+                "vision.views_failed",
+                "图纸视图理解失败，继续使用确定性候选结果",
+                data={"error": str(exc)},
+            )
         store.update_state(status="reviewing", comparison=comparison)
         agent_review = await asyncio.to_thread(run_model_review, directory, store)
+        comparison = json.loads((directory / "comparison.json").read_text(encoding="utf-8"))
+        view_graph_path = directory / "drawing_view_graph.json"
+        if view_graph_path.is_file():
+            view_graph = json.loads(view_graph_path.read_text(encoding="utf-8"))
         elapsed = round(time.perf_counter() - started, 3)
         final_status = "needs_review" if discovery_mode else "completed"
         store.emit(
@@ -513,6 +550,7 @@ async def execute_agent_run(
             elapsed_seconds=elapsed,
             comparison=comparison,
             agent=agent_review,
+            view_graph=view_graph,
         )
         write_metadata(
             directory,

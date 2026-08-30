@@ -62,7 +62,7 @@ def test_apply_view_graph_binds_entities_and_persists_auditable_summary(tmp_path
     }
     vector = {"page": {"width": 100, "height": 100}}
     analysis = {
-        "measurements": {"bounding_box": {"min": [0, 0, 0], "max": [100, 20, 100], "size": [100, 20, 100]}},
+        "measurements": {"bounding_box": {"min": [0, 0, 0], "max": [100, 25, 100], "size": [100, 25, 100]}},
         "linear_edge_features": [
             {"id": "L10", "length": 10, "center": [50, 0, 50], "direction": [1, 0, 0]},
             {"id": "L20", "length": 20, "center": [60, 0, 40], "direction": [1, 0, 0]},
@@ -98,4 +98,8 @@ def test_apply_view_graph_binds_entities_and_persists_auditable_summary(tmp_path
     assert updated["view_intelligence"]["assigned_entities"] == 3
     assert updated["drawing_entities"][0]["status"] == "ai_view_bound"
     assert updated["drawing_entities"][0]["matched_projection_id"] == "front"
+    registration = updated["drawing_entities"][0]["view_registration"]
+    assert registration["method"] == "numeric_landmark_affine"
+    assert registration["inlier_count"] == 3
+    assert registration["rmse_normalized"] == 0.0
     assert (tmp_path / "manufacturing_specification.json").is_file()

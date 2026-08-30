@@ -216,3 +216,35 @@ def test_leader_line_adds_conservative_drawing_context(tmp_path):
     assert all(item["status"] == "context_bound" for item in entities)
     assert all(item["view_id"].startswith("PAGE_1_REGION_") for item in entities)
     assert entities[0]["leader_target_pdf"] == pytest.approx([155, 190])
+
+
+def test_border_index_row_is_quarantined_with_audit_reason(tmp_path):
+    pdf = tmp_path / "border-grid.pdf"
+    writer = PdfWriter()
+    page = writer.add_blank_page(width=800, height=600)
+    font = DictionaryObject(
+        {
+            NameObject("/Type"): NameObject("/Font"),
+            NameObject("/Subtype"): NameObject("/Type1"),
+            NameObject("/BaseFont"): NameObject("/Helvetica"),
+        }
+    )
+    page[NameObject("/Resources")] = DictionaryObject(
+        {NameObject("/Font"): DictionaryObject({NameObject("/F1"): writer._add_object(font)})}
+    )
+    commands = [
+        f"BT /F1 10 Tf 1 0 0 1 {80 + index * 80} 580 Tm ({index + 1}) Tj ET"
+        for index in range(8)
+    ]
+    commands.append("BT /F1 10 Tf 1 0 0 1 300 300 Tm (25) Tj ET")
+    content = DecodedStreamObject()
+    content.set_data(("\n".join(commands) + "\n").encode("ascii"))
+    page[NameObject("/Contents")] = writer._add_object(content)
+    with pdf.open("wb") as stream:
+        writer.write(stream)
+
+    entities, diagnostics = extract_drawing_entities(pdf)
+
+    assert [item["raw_text"] for item in entities] == ["25"]
+    assert diagnostics["excluded_candidate_count"] >= 1
+    assert {item["reason"] for item in diagnostics["excluded_candidates"]} == {"drawing_border_index_row"}

@@ -142,6 +142,14 @@ def _projection_context_score(
         alignment = abs(_axis(feature.get("axis"))[normal_axis])
     drawing_x = (float(target[0]) - float(region[0])) / region_width
     drawing_y = (float(target[1]) - float(region[1])) / region_height
+    registration = entity.get("view_registration") or {}
+    matrix = registration.get("matrix_2x3") or []
+    if len(matrix) == 6:
+        drawing_top_y = 1.0 - drawing_y
+        drawing_x, drawing_y = (
+            float(matrix[0]) * drawing_x + float(matrix[1]) * drawing_top_y + float(matrix[2]),
+            float(matrix[3]) * drawing_x + float(matrix[4]) * drawing_top_y + float(matrix[5]),
+        )
     distance = math.hypot(model_x - drawing_x, model_y - drawing_y) / math.sqrt(2)
     spatial = max(0.0, 1.0 - distance)
 
@@ -152,7 +160,8 @@ def _projection_context_score(
         visibility = 1.0 if alignment >= 0.8 else 0.55
     else:
         visibility = 1.0 if alignment <= 0.8 else 0.6
-    confidence = float(entity.get("context_confidence") or 0.5)
+    registration_confidence = float(registration.get("confidence") or 0)
+    confidence = max(float(entity.get("context_confidence") or 0.5), registration_confidence)
     return max(0.0, min(1.0, spatial * visibility * confidence)), view_name
 
 
@@ -368,6 +377,8 @@ def _score_candidate(
             "context": round(context_score, 6),
             "spatial": round(projection_context[0], 6) if projection_context else None,
             "projection_hint": projection_context[1] if projection_context else None,
+            "registration_method": (entity.get("view_registration") or {}).get("method"),
+            "registration_rmse": (entity.get("view_registration") or {}).get("rmse_normalized"),
             "heuristic": heuristic,
         },
         "measured_value": round(measured, 6), "dimension_delta": round(delta, 6),
@@ -384,7 +395,8 @@ def _within_tolerance(entity: dict[str, Any], measured: float) -> bool | None:
 
 
 def build_manufacturing_specification(measurement_plan: dict[str, Any], analysis: dict[str, Any], comparison: dict[str, Any]) -> dict[str, Any]:
-    entities = list(measurement_plan.get("drawing_entities") or [])
+    all_entities = list(measurement_plan.get("drawing_entities") or [])
+    entities = [item for item in all_entities if item.get("comparison_eligible") is not False]
     cad_features = cad_measurement_features(analysis)
     mappings: list[dict[str, Any]] = []
     rows: list[dict[str, Any]] = []
@@ -486,6 +498,11 @@ def build_manufacturing_specification(measurement_plan: dict[str, Any], analysis
     }
     return {
         "schema_version": "1.1.0", "method": "deterministic_first_context_aware_correspondence",
+        "entity_filtering": {
+            "extracted_entities": len(all_entities),
+            "eligible_entities": len(entities),
+            "excluded_entities": len(all_entities) - len(entities),
+        },
         "scoring": {
             "weights": {"type": TYPE_WEIGHT, "dimension": DIMENSION_WEIGHT, "context": CONTEXT_WEIGHT},
             "candidate_threshold": CANDIDATE_THRESHOLD,

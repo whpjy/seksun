@@ -669,6 +669,13 @@ def extract_drawing_entities(pdf_path: Path, page_number: int = 1) -> tuple[list
         source_items.append(item)
 
     inspection_label_count = 0
+    excluded_candidates: list[dict[str, Any]] = []
+    numeric_rows: dict[int, int] = {}
+    for candidate in texts:
+        numeric_tokens = re.findall(r"(?<!\d)\d{1,3}(?!\d)", candidate.text.strip())
+        if numeric_tokens and re.fullmatch(r"\d{1,3}(?:\s+\d{1,3})*", candidate.text.strip()):
+            row_key = round(candidate.y / 2.0)
+            numeric_rows[row_key] = numeric_rows.get(row_key, 0) + len(numeric_tokens)
     for item in source_items:
         raw = " ".join(item.text.split()).strip()
         if re.fullmatch(r"\d{1,3}", raw) and is_inspection_label(item):
@@ -676,6 +683,29 @@ def extract_drawing_entities(pdf_path: Path, page_number: int = 1) -> tuple[list
             continue
         # Long, tolerance-free integers are overwhelmingly title-block metadata.
         if re.fullmatch(r"\d{4,}", raw):
+            continue
+        row_member_count = numeric_rows.get(round(item.y / 2.0), 0)
+        is_hard_edge_index = (
+            re.fullmatch(r"\d{1,3}", raw) is not None
+            and (item.y >= page_height * 0.965 or item.y <= page_height * 0.035)
+        )
+        is_border_index_row = (
+            re.fullmatch(r"\d{1,3}", raw) is not None
+            and (row_member_count >= 6 or is_hard_edge_index)
+            and (item.y >= page_height * 0.9 or item.y <= page_height * 0.1)
+        )
+        if is_border_index_row:
+            excluded_candidates.append(
+                {
+                    "raw_text": raw,
+                    "anchor_pdf": [round(item.x, 3), round(item.y, 3)],
+                    "reason": "drawing_border_index_row",
+                    "evidence": {
+                        "numeric_tokens_on_row": row_member_count,
+                        "page_edge": "top" if item.y >= page_height * 0.9 else "bottom",
+                    },
+                }
+            )
             continue
         parsed = _parse_annotation(item.text)
         if parsed is None:
@@ -719,6 +749,7 @@ def extract_drawing_entities(pdf_path: Path, page_number: int = 1) -> tuple[list
             "view_id": "PAGE_1_UNASSIGNED",
             "status": "unbound",
             "source_method": "pypdf_text_object",
+            "font_size": round(float(item.font_size or 0), 3),
             **parsed,
         }
         entities.append(entity)
@@ -728,6 +759,8 @@ def extract_drawing_entities(pdf_path: Path, page_number: int = 1) -> tuple[list
         "text_object_count": len(graph["texts"]),
         "entity_count": len(entities),
         "inspection_label_count": inspection_label_count,
+        "excluded_candidate_count": len(excluded_candidates),
+        "excluded_candidates": excluded_candidates,
         "semantic_type_counts": {
             kind: sum(item["semantic_type"] == kind for item in entities)
             for kind in sorted({item["semantic_type"] for item in entities})
@@ -885,6 +918,7 @@ def extract_c10_from_pdf(pdf_path: Path) -> tuple[dict, dict, dict]:
             }
         ],
         "drawing_entities": drawing_entities,
+        "excluded_drawing_entities": entity_diagnostics.get("excluded_candidates", []),
     }
     vector_extraction = {
         "schema_version": "0.2.0",
@@ -934,6 +968,7 @@ def extract_c10_from_pdf(pdf_path: Path) -> tuple[dict, dict, dict]:
                 "confidence": 0.98,
             }
         ],
+        "excluded_drawing_entities": entity_diagnostics.get("excluded_candidates", []),
     }
     diagnostics = {
         "schema_version": "0.1.0",
@@ -976,10 +1011,20 @@ def discover_drawing_requirements(
         r"(?:[Øø⌀±°]|\bREF\b|\bTYP\b|\bMAX\b|\bMIN\b|\bR\s*[0-9]|[0-9]\s*[xX]\s*[Øø⌀]?)",
         re.IGNORECASE,
     )
+    excluded_positions = {
+        (
+            str(item.get("raw_text") or ""),
+            round(float((item.get("anchor_pdf") or [0, 0])[0])),
+            round(float((item.get("anchor_pdf") or [0, 0])[1])),
+        )
+        for item in entity_diagnostics.get("excluded_candidates", [])
+    }
     seen: set[tuple[str, int, int]] = set()
     for item in texts:
         value = " ".join(item.text.split())
         if not value or len(value) > 160:
+            continue
+        if (value, round(item.x), round(item.y)) in excluded_positions:
             continue
         if not numeric_pattern.fullmatch(value) and not engineering_marker.search(value):
             continue
@@ -1028,6 +1073,7 @@ def discover_drawing_requirements(
         },
         "measurements": [],
         "drawing_entities": drawing_entities,
+        "excluded_drawing_entities": entity_diagnostics.get("excluded_candidates", []),
         "requirement_candidates": candidates,
         "extraction": {
             "status": "needs_review",
@@ -1050,6 +1096,7 @@ def discover_drawing_requirements(
         "annotation_bindings": [],
         "annotation_candidates": candidates,
         "drawing_entities": drawing_entities,
+        "excluded_drawing_entities": entity_diagnostics.get("excluded_candidates", []),
     }
     diagnostics = {
         "schema_version": "0.2.0",

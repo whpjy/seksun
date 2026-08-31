@@ -331,6 +331,15 @@ def _type_score(entity: dict[str, Any], feature: dict[str, Any]) -> float:
         if kind in {"bend_radius", "torus_radius", "circular_edge_radius"}:
             return 1.0
         return 0.8 if kind == "cylindrical_feature" and feature.get("internal") is not True else 0.0
+    if semantic == "basic_dimension":
+        return {
+            "bounding_box_dimension": 1.0,
+            "sheet_thickness": 0.98,
+            "datum_dimension": 0.92,
+            "plane_datum_distance": 0.9,
+            "parallel_plane_distance": 0.84,
+            "linear_edge_length": 0.76,
+        }.get(kind, 0.0)
     if semantic == "linear_dimension" and kind in {
         "bounding_box_dimension", "sheet_thickness", "datum_dimension", "plane_datum_distance",
         "parallel_plane_distance", "linear_edge_length",
@@ -371,6 +380,7 @@ def _score_candidate(
         return None
     return {
         "cad_feature_id": feature["id"], "score": round(score, 6),
+        "feature_type": feature["type"],
         "score_components": {
             "type": type_score,
             "dimension": round(dimension_score, 6),
@@ -397,6 +407,7 @@ def _within_tolerance(entity: dict[str, Any], measured: float) -> bool | None:
 def build_manufacturing_specification(measurement_plan: dict[str, Any], analysis: dict[str, Any], comparison: dict[str, Any]) -> dict[str, Any]:
     all_entities = list(measurement_plan.get("drawing_entities") or [])
     entities = [item for item in all_entities if item.get("comparison_eligible") is not False]
+    recognized_only = [item for item in all_entities if item.get("comparison_eligible") is False]
     cad_features = cad_measurement_features(analysis)
     mappings: list[dict[str, Any]] = []
     rows: list[dict[str, Any]] = []
@@ -428,24 +439,45 @@ def build_manufacturing_specification(measurement_plan: dict[str, Any], analysis
             if (candidate := _score_candidate(entity, feature, model_bounds)) is not None
         ]
         candidates.sort(key=lambda item: (-item["score"], item["cad_feature_id"]))
+        if candidates:
+            # Exact and near-exact nominal evidence should not be drowned by a
+            # large population of merely in-window edges. This is a candidate
+            # ranking tier, not a conformance tolerance.
+            best_delta = min(item["dimension_delta"] for item in candidates)
+            delta_band = max(1e-6, _tolerance_epsilon(entity) * 0.12)
+            candidates = [
+                item for item in candidates
+                if item["dimension_delta"] <= best_delta + delta_band
+            ]
+            if entity.get("semantic_type") == "basic_dimension":
+                best_type = max(item["score_components"]["type"] for item in candidates)
+                candidates = [
+                    item for item in candidates
+                    if item["score_components"]["type"] >= best_type - 1e-9
+                ]
+            candidates.sort(key=lambda item: (-item["score"], item["cad_feature_id"]))
         has_spatial_context = bool(
             candidates
             and candidates[0].get("score_components", {}).get("spatial") is not None
         )
         near_tie_ratio = CONTEXT_NEAR_TIE_RATIO if has_spatial_context else NEAR_TIE_RATIO
-        quantity = int(entity.get("quantity") or 1)
+        drawing_quantity = int(entity.get("quantity") or 1)
+        # nX on a linear/radius callout describes repeated occurrences of one
+        # dimension. Only a diameter callout requires an n-member CAD feature
+        # set for deterministic correspondence.
+        required_candidate_count = drawing_quantity if entity.get("semantic_type") == "diameter" else 1
         near_ties = [
             item
             for item in candidates
             if item["score"] >= candidates[0]["score"] * near_tie_ratio
         ] if candidates else []
-        # A quantity callout describes a feature set. Keep at least that many
-        # ranked spatial candidates; otherwise a valid 4x pattern can be cut to
-        # one or two candidates merely because its projected positions differ.
-        retained_count = max(len(near_ties), min(quantity, len(candidates)))
+        # Diameter quantities describe a feature set, so keep at least that many
+        # ranked candidates. Linear/radius nX labels describe repeated instances
+        # of one dimension and therefore use one required correspondence.
+        retained_count = max(len(near_ties), min(required_candidate_count, len(candidates)))
         retained = candidates[:retained_count]
         has_verified_context = _has_verified_drawing_context(entity)
-        if retained and len(retained) == quantity:
+        if retained and len(retained) == required_candidate_count:
             status, ids = "matched", [item["cad_feature_id"] for item in retained]
             values = [item["measured_value"] for item in retained]
             verification_status = (
@@ -490,12 +522,27 @@ def build_manufacturing_specification(measurement_plan: dict[str, Any], analysis
         mappings.append(mapping)
         rows.append({"drawing_entity": entity, "mapping_status": status, "verification_status": verification_status, "cad_feature_ids": ids, "candidate_count": len(retained), "measured_values": values, "result": result, "method": mapping["method"], "confidence": mapping["confidence"]})
 
+    for entity in recognized_only:
+        rows.append({
+            "drawing_entity": entity,
+            "mapping_status": "not_applicable",
+            "verification_status": "recognized_only",
+            "cad_feature_ids": [],
+            "candidate_count": 0,
+            "measured_values": [],
+            "result": "not_evaluated",
+            "method": "semantic_recognition_only",
+            "confidence": round(float(entity.get("confidence") or 0), 6),
+        })
+
     summary = {
-        "drawing_entities": len(entities),
+        "drawing_entities": len(all_entities),
         "matched": sum(item["status"] == "matched" for item in mappings),
         "ambiguous": sum(item["status"] == "ambiguous" for item in mappings),
         "unmapped": sum(item["status"] == "unmapped" for item in mappings),
     }
+    if recognized_only:
+        summary["not_applicable"] = len(recognized_only)
     return {
         "schema_version": "1.1.0", "method": "deterministic_first_context_aware_correspondence",
         "entity_filtering": {
@@ -509,7 +556,7 @@ def build_manufacturing_specification(measurement_plan: dict[str, Any], analysis
             "near_tie_ratio": NEAR_TIE_RATIO,
             "context_near_tie_ratio": CONTEXT_NEAR_TIE_RATIO,
         },
-        "drawing_entities": entities, "cad_features": cad_features, "mappings": mappings,
+        "drawing_entities": all_entities, "cad_features": cad_features, "mappings": mappings,
         "comparison_rows": rows,
         "unmapped_entity_ids": [item["drawing_entity_id"] for item in mappings if item["status"] == "unmapped"],
         "summary": summary,

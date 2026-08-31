@@ -200,3 +200,30 @@ def test_torus_ids_distinguish_radius_roles_and_duplicate_faces_are_merged():
     assert major[0]["evidence"] == 2
     assert len(minor) == 2
     assert all(item["id"].endswith("-MINOR") for item in minor)
+
+
+def test_recognized_only_requirements_remain_visible_as_not_applicable():
+    plan = {
+        "drawing_entities": [
+            {
+                "id": "D2-GDT-001",
+                "raw_text": "0.2 CZ A-A",
+                "semantic_type": "gdt_feature_control_frame",
+                "comparison_eligible": False,
+                "confidence": 0.82,
+            }
+        ],
+        "measurements": [],
+    }
+
+    specification = build_manufacturing_specification(plan, {}, {"features": []})
+
+    assert specification["drawing_entities"] == plan["drawing_entities"]
+    assert specification["entity_filtering"] == {
+        "extracted_entities": 1,
+        "eligible_entities": 0,
+        "excluded_entities": 1,
+    }
+    assert specification["summary"]["not_applicable"] == 1
+    assert specification["comparison_rows"][0]["mapping_status"] == "not_applicable"
+    assert specification["comparison_rows"][0]["verification_status"] == "recognized_only"

@@ -248,3 +248,45 @@ def test_border_index_row_is_quarantined_with_audit_reason(tmp_path):
     assert [item["raw_text"] for item in entities] == ["25"]
     assert diagnostics["excluded_candidate_count"] >= 1
     assert {item["reason"] for item in diagnostics["excluded_candidates"]} == {"drawing_border_index_row"}
+
+
+def test_split_iso_annotations_are_assembled_and_semantically_retained(tmp_path):
+    pdf = tmp_path / "split-annotations.pdf"
+    writer = PdfWriter()
+    page = writer.add_blank_page(width=800, height=600)
+    font = DictionaryObject(
+        {
+            NameObject("/Type"): NameObject("/Font"),
+            NameObject("/Subtype"): NameObject("/Type1"),
+            NameObject("/BaseFont"): NameObject("/Helvetica"),
+        }
+    )
+    page[NameObject("/Resources")] = DictionaryObject(
+        {NameObject("/Font"): DictionaryObject({NameObject("/F1"): writer._add_object(font)})}
+    )
+    commands = [
+        "BT /F1 10 Tf 1 0 0 1 100 300 Tm (17.2) Tj ET",
+        "BT /F1 7 Tf 1 0 0 1 127 308 Tm (+0.15) Tj ET",
+        "BT /F1 7 Tf 1 0 0 1 127 300 Tm (-0.05) Tj ET",
+        "BT /F1 10 Tf 1 0 0 1 100 250 Tm <362E342028327829> Tj ET",
+        "BT /F1 10 Tf 1 0 0 1 100 210 Tm <52312E3228347829> Tj ET",
+        "BT /F1 10 Tf 1 0 0 1 100 170 Tm <2834322E3429> Tj ET",
+        "BT /F1 10 Tf 1 0 0 1 100 130 Tm (0.2 CZ A-A B-B C) Tj ET",
+        "BT /F1 10 Tf 1 0 0 1 100 100 Tm (STAMPING DIRECTION) Tj ET",
+    ]
+    content = DecodedStreamObject()
+    content.set_data(("\n".join(commands) + "\n").encode("ascii"))
+    page[NameObject("/Contents")] = writer._add_object(content)
+    with pdf.open("wb") as stream:
+        writer.write(stream)
+
+    entities, _ = extract_drawing_entities(pdf)
+    by_text = {item["raw_text"]: item for item in entities}
+
+    assert by_text["17.2+0.15/-0.05"]["tolerance"] == {"upper": 0.15, "lower": -0.05}
+    assert by_text["6.4 (2x)"]["semantic_type"] == "linear_dimension"
+    assert by_text["6.4 (2x)"]["quantity"] == 2
+    assert by_text["R1.2(4x)"]["quantity"] == 4
+    assert by_text["(42.4)"]["semantic_type"] == "basic_dimension"
+    assert by_text["0.2 CZ A-A B-B C"]["comparison_eligible"] is False
+    assert by_text["STAMPING DIRECTION"]["comparison_eligible"] is False

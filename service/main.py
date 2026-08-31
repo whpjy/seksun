@@ -413,6 +413,16 @@ def process_pdf_step_comparison(directory: Path, pdf_path: Path, step_path: Path
     comparison["cad_features"] = specification["cad_features"]
     comparison["mappings"] = specification["mappings"]
     comparison["comparison_rows"] = specification["comparison_rows"]
+    if discovery_mode:
+        mapping_summary = specification["summary"]
+        comparison["summary"] = {
+            "matched": mapping_summary["matched"],
+            "passed": 0,
+            "failed": 0,
+            "ambiguous": mapping_summary["ambiguous"],
+            "unmapped": mapping_summary["unmapped"],
+            "not_applicable": mapping_summary.get("not_applicable", 0),
+        }
     (directory / "manufacturing_specification.json").write_text(
         json.dumps(specification, ensure_ascii=False, indent=2),
         encoding="utf-8",

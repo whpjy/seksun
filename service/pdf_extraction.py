@@ -264,6 +264,8 @@ def bind_drawing_context(
             endpoint_index.setdefault(cell, set()).add(index)
     bound: list[tuple[dict[str, Any], list[float], float]] = []
     for entity in entities:
+        if entity.get("skip_context_binding"):
+            continue
         target = _leader_target(
             entity,
             segments,
@@ -381,6 +383,53 @@ def _parse_annotation(text: str) -> dict[str, Any] | None:
     if not compact or len(compact) > 96:
         return None
 
+    if re.fullmatch(r"(?:STAMPING|PUNCHING)DIRECTION", compact, re.IGNORECASE):
+        return {
+            "semantic_type": "process_direction",
+            "nominal": None,
+            "unit": None,
+            "quantity": 1,
+            "target_feature_type": "manufacturing_direction",
+            "confidence": 0.96,
+            "comparison_eligible": False,
+        }
+
+    # Parenthesized values are basic/reference dimensions. They are useful
+    # drawing requirements even though they do not carry a direct tolerance.
+    basic = re.fullmatch(r"\(([0-9]+(?:[.,][0-9]+)?)\)", compact)
+    if basic:
+        return {
+            "semantic_type": "basic_dimension",
+            "nominal": _parse_number(basic.group(1)),
+            "unit": "mm",
+            "quantity": 1,
+            "target_feature_type": "linear_geometry",
+            "confidence": 0.98,
+            "is_basic": True,
+        }
+
+    # Some PDF exports preserve the tolerance and datum labels of a feature
+    # control frame but lose its graphical characteristic symbol. Retain that
+    # evidence without claiming deterministic conformance.
+    gdt = re.fullmatch(
+        r"([0-9]+(?:[.,][0-9]+)?)\s*(?:CZ\s*)?"
+        r"([A-Z](?:-[A-Z])?(?:\s+[A-Z](?:-[A-Z])?)*)",
+        raw,
+        re.IGNORECASE,
+    )
+    if gdt and any(character.isalpha() for character in gdt.group(2)):
+        return {
+            "semantic_type": "gdt_feature_control_frame",
+            "nominal": _parse_number(gdt.group(1)),
+            "unit": "mm",
+            "quantity": 1,
+            "target_feature_type": "geometric_control",
+            "confidence": 0.82,
+            "datum_references": gdt.group(2).upper().split(),
+            "comparison_eligible": False,
+            "recognition_status": "symbol_recovery_required",
+        }
+
     surface = re.search(r"Rz\s*max\s*([0-9]+(?:[.,][0-9]+)?)", raw, re.IGNORECASE)
     if surface:
         return {
@@ -404,17 +453,18 @@ def _parse_annotation(text: str) -> dict[str, Any] | None:
         }
 
     radius = re.fullmatch(
-        r"R(?:\((\d+)[xX]\))?([0-9]+(?:[.,][0-9]+)?)(?:±|\+/-)?([0-9]+(?:[.,][0-9]+)?)?",
+        r"R(?:\((\d+)[xX]\))?([0-9]+(?:[.,][0-9]+)?)(?:\((\d+)[xX]\))?"
+        r"(?:±|\+/-)?([0-9]+(?:[.,][0-9]+)?)?",
         compact,
         re.IGNORECASE,
     )
     if radius:
-        tolerance = _parse_number(radius.group(3))
+        tolerance = _parse_number(radius.group(4))
         return {
             "semantic_type": "radius",
             "nominal": _parse_number(radius.group(2)),
             "unit": "mm",
-            "quantity": int(radius.group(1) or 1),
+            "quantity": int(radius.group(1) or radius.group(3) or 1),
             "tolerance": {"upper": tolerance, "lower": -tolerance}
             if tolerance is not None
             else None,
@@ -423,13 +473,18 @@ def _parse_annotation(text: str) -> dict[str, Any] | None:
         }
 
     asymmetric_dimension = re.fullmatch(
-        r"(?:\((\d+)[xX]\)|(\d+)[xX])?([Ø]?)([0-9]+(?:[.,][0-9]+)?)"
+        r"(?:\((\d+)[xX]\)|(\d+)[xX])?([Ø]?)([0-9]+(?:[.,][0-9]+)?)(?:\((\d+)[xX]\))?"
         r"\+([0-9]+(?:[.,][0-9]+)?)/-([0-9]+(?:[.,][0-9]+)?)",
         compact,
         re.IGNORECASE,
     )
     if asymmetric_dimension:
-        quantity = int(asymmetric_dimension.group(1) or asymmetric_dimension.group(2) or 1)
+        quantity = int(
+            asymmetric_dimension.group(1)
+            or asymmetric_dimension.group(2)
+            or asymmetric_dimension.group(5)
+            or 1
+        )
         has_diameter_symbol = bool(asymmetric_dimension.group(3))
         nominal = _parse_number(asymmetric_dimension.group(4))
         semantic_type = "diameter" if has_diameter_symbol else "linear_dimension"
@@ -439,8 +494,8 @@ def _parse_annotation(text: str) -> dict[str, Any] | None:
             "unit": "mm",
             "quantity": quantity,
             "tolerance": {
-                "upper": _parse_number(asymmetric_dimension.group(5)),
-                "lower": -float(_parse_number(asymmetric_dimension.group(6)) or 0),
+                "upper": _parse_number(asymmetric_dimension.group(6)),
+                "lower": -float(_parse_number(asymmetric_dimension.group(7)) or 0),
             },
             "target_feature_type": "cylindrical_hole" if semantic_type == "diameter" else "linear_geometry",
             "confidence": 0.99 if has_diameter_symbol else 0.9,
@@ -448,7 +503,7 @@ def _parse_annotation(text: str) -> dict[str, Any] | None:
         }
 
     dimension = re.fullmatch(
-        r"(?:\((\d+)[xX]\)|(\d+)[xX])?([Ø]?)([0-9]+(?:[.,][0-9]+)?)"
+        r"(?:\((\d+)[xX]\)|(\d+)[xX])?([Ø]?)([0-9]+(?:[.,][0-9]+)?)(?:\((\d+)[xX]\))?"
         r"(?:(?:±|\+/-)([0-9]+(?:[.,][0-9]+)?))?",
         compact,
         re.IGNORECASE,
@@ -456,15 +511,19 @@ def _parse_annotation(text: str) -> dict[str, Any] | None:
     if not dimension:
         return None
 
-    quantity = int(dimension.group(1) or dimension.group(2) or 1)
+    quantity = int(dimension.group(1) or dimension.group(2) or dimension.group(5) or 1)
     has_diameter_symbol = bool(dimension.group(3))
-    tolerance = _parse_number(dimension.group(5))
+    tolerance = _parse_number(dimension.group(6))
     nominal = _parse_number(dimension.group(4))
     # Some embedded drawing fonts drop the diameter glyph during text extraction.
     # Repeated small callouts are therefore retained as diameter candidates. Large
     # repeated values (for example 2x83.25) remain linear dimensions.
+    # A repeated small value is not enough to prove a diameter (for example,
+    # ``4x 6.4`` can be four linear tabs). Keep the legacy glyph-loss fallback
+    # only when an explicit tolerance also makes the hole-callout shape strong.
     inferred_diameter = quantity > 1 and (
-        tolerance is not None or 1 < float(nominal or 0) <= 15
+        tolerance is not None
+        or (dimension.group(2) is not None and float(nominal or 0) <= 3.0)
     )
     semantic_type = "diameter" if has_diameter_symbol or inferred_diameter else "linear_dimension"
     confidence = 0.99 if has_diameter_symbol else 0.94 if inferred_diameter else 0.78
@@ -556,6 +615,42 @@ def extract_drawing_entities(pdf_path: Path, page_number: int = 1) -> tuple[list
         if quantity_match:
             consumed.add(quantity_match[0])
 
+    # Quantity suffixes are common in ISO drawings: the nominal is on one
+    # baseline and ``(4x)`` is either directly to its right or just below it.
+    # Normalize both layouts to the prefix form understood by the parser.
+    for index, item in enumerate(texts):
+        if index in consumed:
+            continue
+        quantity_match = re.fullmatch(r"\(([0-9]+)[xX]\)", item.text.strip())
+        if not quantity_match:
+            continue
+        targets: list[tuple[float, int, TextItem]] = []
+        for other_index, other in enumerate(texts):
+            if other_index == index or other_index in consumed or is_inspection_label(other):
+                continue
+            target_text = other.text.strip()
+            if not re.fullmatch(r"R?[0-9]+(?:[.,][0-9]+)?", target_text, re.IGNORECASE):
+                continue
+            dx, dy = item.x - other.x, item.y - other.y
+            horizontally_adjacent = abs(dy) <= 4.5 and 3.0 <= abs(dx) <= 52.0
+            vertically_adjacent = abs(dx) <= 30.0 and 5.0 <= abs(dy) <= 27.0
+            if horizontally_adjacent or vertically_adjacent:
+                targets.append((math.hypot(dx, dy), other_index, other))
+        if not targets:
+            continue
+        _, target_index, target = min(targets, key=lambda candidate: candidate[0])
+        quantity = quantity_match.group(1)
+        target_text = target.text.strip()
+        combined = (
+            f"R({quantity}x){target_text[1:]}"
+            if target_text.upper().startswith("R")
+            else f"({quantity}x){target_text}"
+        )
+        source_items.append(
+            TextItem(combined, target.x, target.y, max(item.font_size, target.font_size))
+        )
+        consumed.update({index, target_index})
+
     # Quantity prefixes are also commonly emitted separately from an otherwise
     # complete callout ("8x" + "R14.75", or "2x" + "19.5").
     for index, item in enumerate(texts):
@@ -610,9 +705,9 @@ def extract_drawing_entities(pdf_path: Path, page_number: int = 1) -> tuple[list
                 for other_index, other in enumerate(texts)
                 if other_index not in consumed
                 and other_index != index
-                and re.fullmatch(r"[0-9]+(?:[.,][0-9]+)?", other.text.strip())
-                and float(other.text.replace(",", ".")) <= 1
-                and abs(other.y - item.y) <= 2.5
+                and re.fullmatch(r"\+?[0-9]+(?:[.,][0-9]+)?", other.text.strip())
+                and abs(float(other.text.replace(",", "."))) <= 1
+                and abs(other.y - item.y) <= 12.0
                 and 8.0 <= other.x - item.x <= max(65.0, item.font_size * 7)
                 and not is_inspection_label(other)
             ),
@@ -628,10 +723,10 @@ def extract_drawing_entities(pdf_path: Path, page_number: int = 1) -> tuple[list
                 for other_index, other in enumerate(texts)
                 if other_index not in consumed
                 and other_index not in {index, upper_index}
-                and re.fullmatch(r"[0-9]+(?:[.,][0-9]+)?", other.text.strip())
-                and float(other.text.replace(",", ".")) <= 1
+                and re.fullmatch(r"-?[0-9]+(?:[.,][0-9]+)?", other.text.strip())
+                and abs(float(other.text.replace(",", "."))) <= 1
                 and abs(other.x - upper_item.x) <= 8.0
-                and 8.0 <= upper_item.y - other.y <= 30.0
+                and 4.0 <= abs(upper_item.y - other.y) <= 30.0
                 and not is_inspection_label(other)
             ),
             key=lambda candidate: upper_item.y - candidate[1].y,
@@ -639,7 +734,7 @@ def extract_drawing_entities(pdf_path: Path, page_number: int = 1) -> tuple[list
         )
         if lower_match:
             lower_index, _, lower = lower_match
-            combined = f"{raw}+{upper:g}/-{lower:g}"
+            combined = f"{raw}+{abs(upper):g}/-{abs(lower):g}"
             consumed.add(lower_index)
         else:
             combined = f"{raw}±{upper:g}"
@@ -650,6 +745,31 @@ def extract_drawing_entities(pdf_path: Path, page_number: int = 1) -> tuple[list
         if index in consumed:
             continue
         raw = " ".join(item.text.split()).strip()
+        numeric_values = re.fullmatch(
+            r"([0-9]+(?:[.,][0-9]+)?)\s+([0-9]+(?:[.,][0-9]+)?)"
+            r"(?:\s+([0-9]+(?:[.,][0-9]+)?)\s+([0-9]+(?:[.,][0-9]+)?))?",
+            raw,
+        )
+        if numeric_values:
+            values = [_parse_number(value) for value in numeric_values.groups() if value is not None]
+            pairs = list(zip(values[::2], values[1::2]))
+            if pairs and all(
+                nominal is not None
+                and tolerance is not None
+                and nominal > tolerance
+                and tolerance <= max(1.0, nominal * 0.2)
+                for nominal, tolerance in pairs
+            ):
+                for offset, (nominal, tolerance) in enumerate(pairs):
+                    source_items.append(
+                        TextItem(
+                            text=f"{nominal:g}±{tolerance:g}",
+                            x=item.x + offset * 36.0,
+                            y=item.y,
+                            font_size=item.font_size,
+                        )
+                    )
+                continue
         integer_tokens = re.fullmatch(r"\d+(?:\s+\d+)+", raw)
         if integer_tokens:
             values = raw.split()
@@ -680,6 +800,15 @@ def extract_drawing_entities(pdf_path: Path, page_number: int = 1) -> tuple[list
         raw = " ".join(item.text.split()).strip()
         if re.fullmatch(r"\d{1,3}", raw) and is_inspection_label(item):
             inspection_label_count += 1
+            continue
+        if re.fullmatch(r"0\d+", raw):
+            excluded_candidates.append(
+                {
+                    "raw_text": raw,
+                    "anchor_pdf": [round(item.x, 3), round(item.y, 3)],
+                    "reason": "zero_padded_inspection_or_revision_index",
+                }
+            )
             continue
         # Long, tolerance-free integers are overwhelmingly title-block metadata.
         if re.fullmatch(r"\d{4,}", raw):
@@ -733,8 +862,12 @@ def extract_drawing_entities(pdf_path: Path, page_number: int = 1) -> tuple[list
             continue
         if item.x > page_width * 0.82 and item.y < page_height * 0.58:
             continue
-        text_width = max(item.font_size * 0.55 * len(item.text), 8.0)
-        text_height = max(item.font_size, 8.0)
+        # Some CAD PDF writers expose a unit text matrix even though the visible
+        # glyphs are roughly 8-10 pt high. A hard 8 pt floor for both axes keeps
+        # leader seeding aligned with the actual rendered callout extent.
+        effective_font_size = max(item.font_size, 8.0)
+        text_width = max(effective_font_size * 0.55 * len(item.text), 8.0)
+        text_height = effective_font_size
         entity = {
             "id": f"D2-{len(entities) + 1:03d}",
             "page": page_number,
@@ -753,6 +886,96 @@ def extract_drawing_entities(pdf_path: Path, page_number: int = 1) -> tuple[list
             **parsed,
         }
         entities.append(entity)
+
+    # Preserve standalone nX tokens as auditable context rows. They remain
+    # linked to the assembled parent dimension when one is nearby, but are not
+    # independently compared with CAD geometry.
+    for item in texts:
+        quantity_match = re.fullmatch(r"\(?([0-9]+)[xX]\)?", item.text.strip())
+        if not quantity_match or is_inspection_label(item):
+            continue
+        if item.x < 55 or item.y < max(80.0, page_height * 0.08):
+            continue
+        if item.x > page_width * 0.82 and item.y < page_height * 0.58:
+            continue
+        nearest = min(
+            (
+                (
+                    math.dist(
+                        (item.x, item.y),
+                        tuple(float(value) for value in entity.get("anchor_pdf", [0, 0])),
+                    ),
+                    entity,
+                )
+                for entity in entities
+                if entity.get("comparison_eligible") is not False
+            ),
+            key=lambda candidate: candidate[0],
+            default=None,
+        )
+        parent_id = nearest[1]["id"] if nearest and nearest[0] <= 90.0 else None
+        entities.append(
+            {
+                "id": f"D2-{len(entities) + 1:03d}",
+                "page": page_number,
+                "raw_text": item.text.strip(),
+                "anchor_pdf": [round(item.x, 3), round(item.y, 3)],
+                "bbox_pdf": [
+                    round(item.x, 3), round(item.y - 2.0, 3),
+                    round(item.x + max(8.0, len(item.text) * 4.4), 3),
+                    round(item.y + 8.0, 3),
+                ],
+                "view_id": "PAGE_1_UNASSIGNED",
+                "status": "context_only",
+                "source_method": "pypdf_quantity_context",
+                "semantic_type": "quantity_multiplier",
+                "nominal": None,
+                "unit": None,
+                "quantity": int(quantity_match.group(1)),
+                "target_feature_type": "annotation_context",
+                "confidence": 0.96 if parent_id else 0.72,
+                "comparison_eligible": False,
+                "parent_entity_id": parent_id,
+                "skip_context_binding": True,
+            }
+        )
+
+    linked_quantity_parents = {
+        str(entity.get("parent_entity_id"))
+        for entity in entities
+        if entity.get("semantic_type") == "quantity_multiplier"
+        and entity.get("parent_entity_id")
+    }
+    repeated_entities = [
+        entity for entity in entities
+        if entity.get("comparison_eligible") is not False
+        and int(entity.get("quantity") or 1) > 1
+        and entity["id"] not in linked_quantity_parents
+    ]
+    for parent in repeated_entities:
+        quantity = int(parent["quantity"])
+        anchor = parent.get("anchor_pdf") or [0, 0]
+        entities.append(
+            {
+                "id": f"D2-{len(entities) + 1:03d}",
+                "page": page_number,
+                "raw_text": f"({quantity}x)",
+                "anchor_pdf": list(anchor),
+                "bbox_pdf": list(parent.get("bbox_pdf") or [*anchor, *anchor]),
+                "view_id": parent.get("view_id", "PAGE_1_UNASSIGNED"),
+                "status": "context_only",
+                "source_method": "derived_quantity_context",
+                "semantic_type": "quantity_multiplier",
+                "nominal": None,
+                "unit": None,
+                "quantity": quantity,
+                "target_feature_type": "annotation_context",
+                "confidence": 0.92,
+                "comparison_eligible": False,
+                "parent_entity_id": parent["id"],
+                "skip_context_binding": True,
+            }
+        )
 
     diagnostics = {
         "page": page_number,

@@ -152,6 +152,8 @@ def test_comparison_process_uses_raw_pdf_without_sidecar(tmp_path, monkeypatch):
     ):
         assert (output / name).is_file()
     assert result["manufacturing_specification"]["summary"]["matched"] >= 1
+    assert result["view_intelligence"]["source"] == "deterministic_fallback"
+    assert (output / "drawing_view_graph.json").is_file()
 
 
 def test_unsupported_drawing_enters_requirement_discovery(tmp_path, monkeypatch):
@@ -216,6 +218,47 @@ def test_leader_line_adds_conservative_drawing_context(tmp_path):
     assert all(item["status"] == "context_bound" for item in entities)
     assert all(item["view_id"].startswith("PAGE_1_REGION_") for item in entities)
     assert entities[0]["leader_target_pdf"] == pytest.approx([155, 190])
+    assert entities[0]["adjacent_segment_pdf"] == [[118.0, 220.0], [155.0, 190.0]]
+    assert len(entities[0]["dimension_direction_pdf"]) == 2
+    assert entities[0]["direction_confidence"] > 0.5
+    assert entities[0]["connected_segment_count"] == 1
+
+
+def test_vector_frame_and_detached_tolerance_are_recognized_only(tmp_path):
+    pdf = tmp_path / "semantic-context.pdf"
+    writer = PdfWriter()
+    page = writer.add_blank_page(width=500, height=400)
+    font = DictionaryObject(
+        {
+            NameObject("/Type"): NameObject("/Font"),
+            NameObject("/Subtype"): NameObject("/Type1"),
+            NameObject("/BaseFont"): NameObject("/Helvetica"),
+        }
+    )
+    page[NameObject("/Resources")] = DictionaryObject(
+        {NameObject("/Font"): DictionaryObject({NameObject("/F1"): writer._add_object(font)})}
+    )
+    content = DecodedStreamObject()
+    content.set_data(
+        b"BT /F1 10 Tf 1 0 0 1 220 220 Tm (0.1) Tj ET\n"
+        b"200 215 m 260 215 l S 200 235 m 260 235 l S\n"
+        b"200 215 m 200 235 l S 260 215 m 260 235 l S\n"
+        b"BT /F1 10 Tf 1 0 0 1 120 150 Tm (0.0) Tj ET\n"
+        b"BT /F1 10 Tf 1 0 0 1 120 138 Tm (-0.05) Tj ET\n"
+    )
+    page[NameObject("/Contents")] = writer._add_object(content)
+    with pdf.open("wb") as stream:
+        writer.write(stream)
+
+    entities, _ = extract_drawing_entities(pdf)
+
+    framed = next(item for item in entities if item["raw_text"] == "0.1")
+    fragment = next(item for item in entities if item["raw_text"] == "0.0")
+    assert framed["semantic_type"] == "gdt_feature_control_frame"
+    assert framed["comparison_eligible"] is False
+    assert framed["recognition_status"] == "numeric_cell_in_vector_frame"
+    assert fragment["semantic_type"] == "tolerance_fragment"
+    assert fragment["comparison_eligible"] is False
 
 
 def test_border_index_row_is_quarantined_with_audit_reason(tmp_path):

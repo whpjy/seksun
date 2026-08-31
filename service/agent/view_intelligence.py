@@ -143,6 +143,21 @@ def _fallback_graph(directory: Path, model: str, reason: str) -> dict[str, Any]:
         view_id = str(entity.get("view_id") or "")
         if view_id and not view_id.endswith("UNASSIGNED"):
             grouped.setdefault(view_id, []).append(entity)
+    projection_aspects: dict[str, float] = {}
+    projection_method = "unknown"
+    manifest_path = directory / "views" / "views.json"
+    if manifest_path.is_file():
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        projection_method = str(manifest.get("projection_method") or "unknown").lower()
+        if projection_method not in {"first_angle", "third_angle"}:
+            projection_method = "unknown"
+        for item in manifest.get("views") or []:
+            projection_id = str(item.get("id") or "").lower()
+            projection_width = float(item.get("width") or 0)
+            projection_height = float(item.get("height") or 0)
+            if projection_id in PROJECTION_IDS and projection_width > 0 and projection_height > 0:
+                projection_aspects[projection_id] = projection_width / projection_height
+
     views = []
     for view_id, entities in grouped.items():
         bounds = [item.get("view_region_pdf") for item in entities if len(item.get("view_region_pdf") or []) == 4]
@@ -152,27 +167,65 @@ def _fallback_graph(directory: Path, model: str, reason: str) -> dict[str, Any]:
         right = max(float(item[2]) for item in bounds) / width
         bottom = min(float(item[1]) for item in bounds) / height
         top = max(float(item[3]) for item in bounds) / height
+        region_width = (right - left) * width
+        region_height = (top - bottom) * height
+        matched_projection_id = None
+        evidence = "deterministic region clustered from PDF leader endpoints"
+        if len(entities) >= 6 and region_width >= 20 and region_height >= 20:
+            drawing_aspect = region_width / region_height
+            ranked = sorted(
+                (
+                    abs(math.log(drawing_aspect / projection_aspect)),
+                    projection_id,
+                )
+                for projection_id, projection_aspect in projection_aspects.items()
+            )
+            if ranked and ranked[0][0] <= 0.75 and (
+                len(ranked) == 1 or ranked[1][0] - ranked[0][0] >= 0.35
+            ):
+                matched_projection_id = ranked[0][1]
+                evidence = (
+                    f"leader-region aspect {drawing_aspect:.3f} uniquely matches "
+                    f"STEP {matched_projection_id} projection"
+                )
+        direction, x_direction = PROJECTION_FRAMES.get(
+            str(matched_projection_id), (None, None)
+        )
         views.append(
             {
                 "id": view_id,
-                "type": "unknown",
+                "type": matched_projection_id or "unknown",
                 "label": None,
-                "bbox_normalized": [round(left, 6), round(1 - top, 6), round(right, 6), round(1 - bottom, 6)],
-                "matched_projection_id": None,
-                "observation_direction": None,
-                "x_direction": None,
-                "confidence": 0.35,
-                "evidence": "由PDF引出线终点聚类生成的确定性回退区域",
+                "bbox_normalized": [
+                    round(left, 6),
+                    round(1 - top, 6),
+                    round(right, 6),
+                    round(1 - bottom, 6),
+                ],
+                "matched_projection_id": matched_projection_id,
+                "observation_direction": direction,
+                "x_direction": x_direction,
+                "confidence": 0.55 if matched_projection_id else 0.35,
+                "evidence": evidence,
             }
         )
     return {
         "schema_version": "0.1.0",
         "source": "deterministic_fallback",
         "model": model,
-        "projection_method": "unknown",
+        "projection_method": projection_method,
         "views": views[:16],
         "uncertainties": [reason[:300]],
     }
+
+
+def build_deterministic_view_graph(
+    directory: Path,
+    reason: str = "local deterministic view registration",
+) -> dict[str, Any]:
+    """Build an auditable view graph without an external model call."""
+
+    return _fallback_graph(directory, "deterministic", reason)
 
 
 def understand_drawing_views(directory: Path) -> dict[str, Any]:
@@ -260,7 +313,12 @@ def _project_feature_normalized(
 def _registration_candidates(entity: dict[str, Any], features: list[dict[str, Any]]) -> list[dict[str, Any]]:
     semantic = entity.get("semantic_type")
     nominal = entity.get("nominal")
-    if nominal is None or semantic not in {"radius", "diameter", "linear_dimension"}:
+    if nominal is None or semantic not in {
+        "radius",
+        "diameter",
+        "linear_dimension",
+        "basic_dimension",
+    }:
         return []
     nominal = float(nominal)
     epsilon = max(0.2, abs(nominal) * 0.02)
@@ -273,7 +331,9 @@ def _registration_candidates(entity: dict[str, Any], features: list[dict[str, An
             continue
         if semantic == "diameter" and kind not in diameter_types:
             continue
-        if semantic == "linear_dimension" and (kind in radius_types or kind in diameter_types):
+        if semantic in {"linear_dimension", "basic_dimension"} and (
+            kind in radius_types or kind in diameter_types
+        ):
             continue
         if abs(float(feature.get("value") or 0) - nominal) <= epsilon:
             result.append(feature)
@@ -500,7 +560,7 @@ def apply_view_graph(directory: Path, graph: dict[str, Any]) -> dict[str, Any]:
                 "view_direction_hint": view.get("observation_direction"),
                 "view_x_direction_hint": view.get("x_direction"),
                 "matched_projection_id": view.get("matched_projection_id"),
-                "comparison_eligible": True,
+                "comparison_eligible": entity.get("comparison_eligible") is not False,
             }
         )
         assignments.setdefault(view["id"], []).append(entity)
@@ -549,8 +609,11 @@ def apply_view_graph(directory: Path, graph: dict[str, Any]) -> dict[str, Any]:
     )
     updated_summary = specification["summary"]
     accepted = bool(
-        affine_count > 0
-        or int(updated_summary.get("matched") or 0) >= int(previous.get("matched") or 0)
+        int(updated_summary.get("matched") or 0) >= int(previous.get("matched") or 0)
+        and int(updated_summary.get("ambiguous") or 0)
+        <= int(previous.get("ambiguous") or 0)
+        and int(updated_summary.get("unmapped") or 0)
+        <= int(previous.get("unmapped") or 0)
     )
     view_intelligence = {
         "source": graph.get("source"),

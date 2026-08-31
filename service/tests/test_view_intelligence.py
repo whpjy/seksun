@@ -1,6 +1,10 @@
 import json
 
-from service.agent.view_intelligence import _normalize_graph, apply_view_graph
+from service.agent.view_intelligence import (
+    _normalize_graph,
+    apply_view_graph,
+    build_deterministic_view_graph,
+)
 
 
 def test_normalize_view_graph_uses_authoritative_canonical_camera_frame():
@@ -103,3 +107,45 @@ def test_apply_view_graph_binds_entities_and_persists_auditable_summary(tmp_path
     assert registration["inlier_count"] == 3
     assert registration["rmse_normalized"] == 0.0
     assert (tmp_path / "manufacturing_specification.json").is_file()
+
+
+def test_deterministic_view_graph_uses_only_clear_projection_aspect(tmp_path):
+    plan = {
+        "drawing_entities": [
+            {
+                "id": f"D2-{index:03d}",
+                "view_id": "PAGE_1_REGION_01",
+                "view_region_pdf": [10, 10, 110, 60],
+            }
+            for index in range(1, 7)
+        ]
+        + [
+            {
+                "id": f"D2-{index:03d}",
+                "view_id": "PAGE_1_REGION_02",
+                "view_region_pdf": [130, 10, 161.62, 60],
+            }
+            for index in range(7, 13)
+        ]
+    }
+    vector = {"page": {"width": 200, "height": 100}}
+    manifest = {
+        "projection_method": "FIRST_ANGLE",
+        "views": [
+            {"id": "front", "width": 100, "height": 50},
+            {"id": "top", "width": 100, "height": 10},
+            {"id": "right", "width": 10, "height": 50},
+        ],
+    }
+    (tmp_path / "measurement_plan.json").write_text(json.dumps(plan), encoding="utf-8")
+    (tmp_path / "vector_extraction.json").write_text(json.dumps(vector), encoding="utf-8")
+    (tmp_path / "views").mkdir()
+    (tmp_path / "views" / "views.json").write_text(json.dumps(manifest), encoding="utf-8")
+
+    graph = build_deterministic_view_graph(tmp_path)
+
+    assert graph["source"] == "deterministic_fallback"
+    assert graph["projection_method"] == "first_angle"
+    assert graph["views"][0]["matched_projection_id"] == "front"
+    assert graph["views"][0]["observation_direction"] == [0.0, -1.0, 0.0]
+    assert graph["views"][1]["matched_projection_id"] is None

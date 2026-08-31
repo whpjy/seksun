@@ -165,6 +165,88 @@ def _projection_context_score(
     return max(0.0, min(1.0, spatial * visibility * confidence)), view_name
 
 
+def _dimension_direction_score(
+    entity: dict[str, Any],
+    feature: dict[str, Any],
+    model_bounds: tuple[list[float], list[float], list[float]],
+) -> float | None:
+    """Compare an adjacent PDF line with the candidate axis in the chosen view."""
+
+    drawing_direction = entity.get("dimension_direction_pdf") or []
+    if (
+        entity.get("semantic_type") not in {"linear_dimension", "basic_dimension"}
+        or len(drawing_direction) != 2
+    ):
+        return None
+    drawing_length = math.hypot(float(drawing_direction[0]), float(drawing_direction[1]))
+    if drawing_length <= 1e-8:
+        return None
+    drawing_axis = [
+        float(drawing_direction[0]) / drawing_length,
+        float(drawing_direction[1]) / drawing_length,
+    ]
+
+    direction_hint = entity.get("view_direction_hint")
+    x_hint = entity.get("view_x_direction_hint")
+    if isinstance(direction_hint, list) and isinstance(x_hint, list):
+        direction = _axis(direction_hint)
+        x_direction = _axis(x_hint)
+    else:
+        region = entity.get("view_region_pdf") or []
+        _, _, sizes = model_bounds
+        if len(region) != 4 or max(sizes or [0]) <= 0:
+            return None
+        region_width = float(region[2]) - float(region[0])
+        region_height = float(region[3]) - float(region[1])
+        if region_width <= 0 or region_height <= 0:
+            return None
+        frames = {
+            "front": ([0.0, -1.0, 0.0], [1.0, 0.0, 0.0], sizes[0], sizes[2]),
+            "top": ([0.0, 0.0, 1.0], [1.0, 0.0, 0.0], sizes[0], sizes[1]),
+            "right": ([-1.0, 0.0, 0.0], [0.0, -1.0, 0.0], sizes[1], sizes[2]),
+        }
+        viable = [
+            (
+                abs(math.log((region_width / region_height) / (frame[2] / frame[3]))),
+                frame,
+            )
+            for frame in frames.values()
+            if frame[2] > 1e-9 and frame[3] > 1e-9
+        ]
+        if not viable:
+            return None
+        _, frame = min(viable, key=lambda item: item[0])
+        direction, x_direction = frame[0], frame[1]
+
+    dot_dx = sum(direction[index] * x_direction[index] for index in range(3))
+    x_direction = [
+        x_direction[index] - direction[index] * dot_dx for index in range(3)
+    ]
+    x_length = math.sqrt(sum(value * value for value in x_direction))
+    if x_length <= 1e-8:
+        return None
+    x_direction = [value / x_length for value in x_direction]
+    y_direction = [
+        direction[1] * x_direction[2] - direction[2] * x_direction[1],
+        direction[2] * x_direction[0] - direction[0] * x_direction[2],
+        direction[0] * x_direction[1] - direction[1] * x_direction[0],
+    ]
+    feature_axis = _axis(feature.get("axis"))
+    projected = [
+        sum(feature_axis[index] * x_direction[index] for index in range(3)),
+        sum(feature_axis[index] * y_direction[index] for index in range(3)),
+    ]
+    projected_length = math.hypot(projected[0], projected[1])
+    if projected_length <= 1e-8:
+        return 0.0
+    projected = [projected[0] / projected_length, projected[1] / projected_length]
+    alignment = abs(
+        drawing_axis[0] * projected[0] + drawing_axis[1] * projected[1]
+    )
+    confidence = max(0.0, min(1.0, float(entity.get("direction_confidence") or 0.5)))
+    return 0.5 * (1 - confidence) + alignment * confidence
+
+
 def cad_measurement_features(analysis: dict[str, Any]) -> list[dict[str, Any]]:
     """Normalize OCCT output into auditable linear, radius and diameter candidates."""
     minimum, maximum, sizes = _model_bounds(analysis)
@@ -354,6 +436,70 @@ def _measured_value(entity: dict[str, Any], feature: dict[str, Any]) -> float:
     return float(feature["value"])
 
 
+def _linear_feature_preference(feature_type: str) -> int:
+    """Prefer explicit distance constructs over incidental equal-length edges."""
+
+    return 2 if feature_type in {
+        "bounding_box_dimension",
+        "sheet_thickness",
+        "datum_dimension",
+        "plane_datum_distance",
+        "parallel_plane_distance",
+    } else 1
+
+
+def _projected_feature_signature(
+    feature: dict[str, Any], projection_hint: str | None
+) -> tuple[Any, ...] | None:
+    start, end = feature.get("start"), feature.get("end")
+    axes = {"front": (0, 2), "top": (0, 1), "right": (1, 2)}.get(
+        str(projection_hint or "")
+    )
+    if axes is None or not isinstance(start, list) or not isinstance(end, list):
+        return None
+    if len(start) != 3 or len(end) != 3:
+        return None
+    first = tuple(round(float(start[index]), 4) for index in axes)
+    second = tuple(round(float(end[index]), 4) for index in axes)
+    endpoints = tuple(sorted((first, second)))
+    return (
+        feature.get("type"),
+        round(float(feature.get("value") or 0), 5),
+        endpoints,
+    )
+
+
+def _consolidate_projected_equivalents(
+    candidates: list[dict[str, Any]],
+    feature_index: dict[str, dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Collapse front/back duplicates with identical projected measurement endpoints."""
+
+    grouped: dict[tuple[Any, ...], list[dict[str, Any]]] = {}
+    passthrough: list[dict[str, Any]] = []
+    for candidate in candidates:
+        feature = feature_index.get(str(candidate.get("cad_feature_id")))
+        signature = _projected_feature_signature(
+            feature or {},
+            (candidate.get("score_components") or {}).get("projection_hint"),
+        )
+        if signature is None:
+            passthrough.append(candidate)
+        else:
+            grouped.setdefault(signature, []).append(candidate)
+    consolidated = list(passthrough)
+    for group in grouped.values():
+        group.sort(key=lambda item: (-item["score"], item["cad_feature_id"]))
+        representative = dict(group[0])
+        equivalent_ids = sorted(
+            str(item["cad_feature_id"]) for item in group
+        )
+        representative["equivalent_cad_feature_ids"] = equivalent_ids
+        representative["equivalent_feature_count"] = len(equivalent_ids)
+        consolidated.append(representative)
+    return consolidated
+
+
 def _score_candidate(
     entity: dict[str, Any],
     feature: dict[str, Any],
@@ -369,11 +515,17 @@ def _score_candidate(
     dimension_score = max(0.8, 1 - delta / max(epsilon, 1e-9) * 0.2)
     evidence_score = min(0.8, 0.5 + math.log2(max(int(feature.get("evidence") or 1), 1)) * 0.1)
     projection_context = _projection_context_score(entity, feature, model_bounds)
-    context_score = (
-        0.25 * evidence_score + 0.75 * projection_context[0]
-        if projection_context is not None
-        else evidence_score
-    )
+    direction_score = _dimension_direction_score(entity, feature, model_bounds)
+    if projection_context is not None and direction_score is not None:
+        context_score = (
+            0.2 * evidence_score
+            + 0.6 * projection_context[0]
+            + 0.2 * direction_score
+        )
+    elif projection_context is not None:
+        context_score = 0.25 * evidence_score + 0.75 * projection_context[0]
+    else:
+        context_score = evidence_score
     heuristic = 0.1 if entity.get("diameter_symbol_present") else 0.0
     score = TYPE_WEIGHT * type_score + DIMENSION_WEIGHT * dimension_score + CONTEXT_WEIGHT * context_score + heuristic
     if score < CANDIDATE_THRESHOLD:
@@ -386,6 +538,7 @@ def _score_candidate(
             "dimension": round(dimension_score, 6),
             "context": round(context_score, 6),
             "spatial": round(projection_context[0], 6) if projection_context else None,
+            "direction": round(direction_score, 6) if direction_score is not None else None,
             "projection_hint": projection_context[1] if projection_context else None,
             "registration_method": (entity.get("view_registration") or {}).get("method"),
             "registration_rmse": (entity.get("view_registration") or {}).get("rmse_normalized"),
@@ -409,6 +562,7 @@ def build_manufacturing_specification(measurement_plan: dict[str, Any], analysis
     entities = [item for item in all_entities if item.get("comparison_eligible") is not False]
     recognized_only = [item for item in all_entities if item.get("comparison_eligible") is False]
     cad_features = cad_measurement_features(analysis)
+    cad_feature_index = {str(item["id"]): item for item in cad_features}
     mappings: list[dict[str, Any]] = []
     rows: list[dict[str, Any]] = []
     measurements = measurement_plan.get("measurements") or []
@@ -455,6 +609,19 @@ def build_manufacturing_specification(measurement_plan: dict[str, Any], analysis
                     item for item in candidates
                     if item["score_components"]["type"] >= best_type - 1e-9
                 ]
+            elif entity.get("semantic_type") == "linear_dimension":
+                best_preference = max(
+                    _linear_feature_preference(item["feature_type"])
+                    for item in candidates
+                )
+                candidates = [
+                    item for item in candidates
+                    if _linear_feature_preference(item["feature_type"])
+                    == best_preference
+                ]
+            candidates = _consolidate_projected_equivalents(
+                candidates, cad_feature_index
+            )
             candidates.sort(key=lambda item: (-item["score"], item["cad_feature_id"]))
         has_spatial_context = bool(
             candidates
@@ -474,6 +641,13 @@ def build_manufacturing_specification(measurement_plan: dict[str, Any], analysis
         # Diameter quantities describe a feature set, so keep at least that many
         # ranked candidates. Linear/radius nX labels describe repeated instances
         # of one dimension and therefore use one required correspondence.
+        repeated_linear_group = bool(
+            entity.get("semantic_type") == "linear_dimension"
+            and drawing_quantity > 1
+            and len(near_ties) == drawing_quantity
+        )
+        if repeated_linear_group:
+            required_candidate_count = drawing_quantity
         retained_count = max(len(near_ties), min(required_candidate_count, len(candidates)))
         retained = candidates[:retained_count]
         has_verified_context = _has_verified_drawing_context(entity)

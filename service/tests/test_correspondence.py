@@ -180,6 +180,150 @@ def test_leader_position_disambiguates_equal_numeric_candidates_conservatively()
     assert mapping["candidates"][0]["score_components"]["projection_hint"] == "front"
 
 
+def test_pdf_dimension_direction_disambiguates_candidate_axes():
+    plan = {
+        "drawing_entities": [
+            {
+                "id": "D2-001",
+                "semantic_type": "linear_dimension",
+                "nominal": 10.0,
+                "quantity": 1,
+                "view_id": "PAGE_1_REGION_01",
+                "status": "context_bound",
+                "leader_target_pdf": [50, 50],
+                "view_region_pdf": [0, 0, 100, 100],
+                "view_region_size": 3,
+                "context_confidence": 1.0,
+                "dimension_direction_pdf": [1, 0],
+                "direction_confidence": 0.85,
+                "view_direction_hint": [0, -1, 0],
+                "view_x_direction_hint": [1, 0, 0],
+            }
+        ],
+        "measurements": [],
+    }
+    analysis = {
+        "measurements": {
+            "bounding_box": {
+                "min": [0, 0, 0],
+                "max": [100, 20, 100],
+                "size": [100, 20, 100],
+            }
+        },
+        "linear_edge_features": [
+            {"id": "HORIZONTAL", "length": 10, "center": [50, 0, 50], "direction": [1, 0, 0]},
+            {"id": "VERTICAL", "length": 10, "center": [50, 0, 50], "direction": [0, 0, 1]},
+        ],
+    }
+
+    specification = build_manufacturing_specification(plan, analysis, {"features": []})
+
+    mapping = specification["mappings"][0]
+    assert mapping["status"] == "matched"
+    assert mapping["cad_feature_ids"] == ["HORIZONTAL"]
+    assert mapping["candidates"][0]["score_components"]["direction"] > 0.9
+
+
+def test_repeated_linear_callout_accepts_exact_candidate_group():
+    plan = {
+        "drawing_entities": [
+            {
+                "id": "D2-001",
+                "semantic_type": "linear_dimension",
+                "nominal": 19.0,
+                "quantity": 2,
+            }
+        ],
+        "measurements": [],
+    }
+    analysis = {
+        "plane_distance_features": [
+            {"id": "LEFT", "distance": 19.0, "start": [-20, 0, 0], "end": [-1, 0, 0]},
+            {"id": "RIGHT", "distance": 19.0, "start": [1, 0, 0], "end": [20, 0, 0]},
+        ]
+    }
+
+    specification = build_manufacturing_specification(plan, analysis, {"features": []})
+
+    mapping = specification["mappings"][0]
+    assert mapping["status"] == "matched"
+    assert mapping["cad_feature_ids"] == ["LEFT", "RIGHT"]
+
+
+def test_explicit_plane_distance_is_preferred_over_incidental_edge_length():
+    plan = {
+        "drawing_entities": [
+            {
+                "id": "D2-001",
+                "semantic_type": "linear_dimension",
+                "nominal": 20.8,
+                "quantity": 1,
+            }
+        ],
+        "measurements": [],
+    }
+    analysis = {
+        "plane_distance_features": [
+            {"id": "DESIGN-DISTANCE", "distance": 20.8, "start": [0, 0, 0], "end": [20.8, 0, 0]},
+        ],
+        "linear_edge_features": [
+            {"id": "EDGE-1", "length": 20.8, "start": [0, 1, 0], "end": [20.8, 1, 0]},
+            {"id": "EDGE-2", "length": 20.8, "start": [0, 2, 0], "end": [20.8, 2, 0]},
+        ],
+    }
+
+    specification = build_manufacturing_specification(plan, analysis, {"features": []})
+
+    mapping = specification["mappings"][0]
+    assert mapping["status"] == "matched"
+    assert mapping["cad_feature_ids"] == ["DESIGN-DISTANCE"]
+
+
+def test_front_projection_collapses_duplicate_depth_edges_auditably():
+    plan = {
+        "drawing_entities": [
+            {
+                "id": "D2-001",
+                "semantic_type": "linear_dimension",
+                "nominal": 4.0,
+                "quantity": 1,
+                "view_id": "PAGE_1_REGION_01",
+                "status": "context_bound",
+                "leader_target_pdf": [80, 50],
+                "view_region_pdf": [0, 0, 100, 100],
+                "view_region_size": 3,
+                "context_confidence": 1.0,
+                "view_direction_hint": [0, -1, 0],
+                "view_x_direction_hint": [1, 0, 0],
+                "matched_projection_id": "front",
+            }
+        ],
+        "measurements": [],
+    }
+    analysis = {
+        "measurements": {
+            "bounding_box": {
+                "min": [-10, 0, 0],
+                "max": [10, 5, 10],
+                "size": [20, 5, 10],
+            }
+        },
+        "linear_edge_features": [
+            {"id": "FRONT-SKIN", "length": 4, "start": [5, 0, 2], "end": [5, 0, 6], "center": [5, 0, 4]},
+            {"id": "BACK-SKIN", "length": 4, "start": [5, 5, 2], "end": [5, 5, 6], "center": [5, 5, 4]},
+            {"id": "OTHER", "length": 4, "start": [-5, 0, 2], "end": [-5, 0, 6], "center": [-5, 0, 4]},
+        ],
+    }
+
+    specification = build_manufacturing_specification(plan, analysis, {"features": []})
+
+    mapping = specification["mappings"][0]
+    assert mapping["status"] == "matched"
+    candidate = mapping["candidates"][0]
+    assert candidate["equivalent_cad_feature_ids"] == ["BACK-SKIN", "FRONT-SKIN"]
+    assert candidate["equivalent_feature_count"] == 2
+
+
 def test_torus_ids_distinguish_radius_roles_and_duplicate_faces_are_merged():
     analysis = {
         "radius_pair_analysis": {

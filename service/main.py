@@ -24,7 +24,11 @@ from dotenv import load_dotenv
 from service.agent.events import AgentRunStore, TERMINAL_STATUSES
 from service.agent.runtime import run_model_review
 from service.agent.vision import prepare_visual_observations
-from service.agent.view_intelligence import apply_view_graph, understand_drawing_views
+from service.agent.view_intelligence import (
+    apply_view_graph,
+    build_deterministic_view_graph,
+    understand_drawing_views,
+)
 from service.comparison import compare_c10_from_analysis
 from service.correspondence import build_manufacturing_specification
 from service.pdf_extraction import discover_drawing_requirements, extract_c10_from_pdf
@@ -114,6 +118,7 @@ class ComparisonLinks(ResultLinks):
     measurement_plan: str
     vector_extraction: str
     extraction_diagnostics: str
+    drawing_view_graph: str
 
 
 class ComparisonJobResponse(BaseModel):
@@ -195,6 +200,7 @@ def build_comparison_response(metadata: dict, comparison: dict) -> ComparisonJob
             measurement_plan=file_url(job_id, "measurement_plan.json"),
             vector_extraction=file_url(job_id, "vector_extraction.json"),
             extraction_diagnostics=file_url(job_id, "pdf_extraction_diagnostics.json"),
+            drawing_view_graph=file_url(job_id, "drawing_view_graph.json"),
             front=file_url(job_id, "front.svg"),
             top=file_url(job_id, "top.svg"),
             right=file_url(job_id, "right.svg"),
@@ -431,7 +437,8 @@ def process_pdf_step_comparison(directory: Path, pdf_path: Path, step_path: Path
         json.dumps(comparison, ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
-    return comparison
+    deterministic_graph = build_deterministic_view_graph(directory)
+    return apply_view_graph(directory, deterministic_graph)
 
 
 def agent_result_links(job_id: str) -> dict:
@@ -514,10 +521,9 @@ async def execute_agent_run(
             )
         try:
             view_graph = await asyncio.to_thread(understand_drawing_views, directory)
-            if view_graph.get("source") == "multimodal_model":
-                comparison = await asyncio.to_thread(
-                    apply_view_graph, directory, view_graph
-                )
+            comparison = await asyncio.to_thread(
+                apply_view_graph, directory, view_graph
+            )
             store.emit(
                 "vision.views_understood",
                 "多模态模型已生成可审计的图纸视图关系图",

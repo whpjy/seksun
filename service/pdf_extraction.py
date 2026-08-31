@@ -165,7 +165,7 @@ def _leader_target(
     endpoint_index: dict[tuple[int, int], set[int]],
     page_width: float,
     page_height: float,
-) -> tuple[list[float], float] | None:
+) -> tuple[list[float], float, dict[str, Any]] | None:
     """Follow linework adjacent to a callout and return its remote endpoint.
 
     Engineering PDF writers normally emit leaders and dimension shoulders as
@@ -191,6 +191,21 @@ def _leader_target(
     }
     if not seeds:
         return None
+
+    # Preserve the line segment closest to the annotation as independent
+    # directional evidence.  It is deliberately not assumed to be a verified
+    # dimension line: depending on drafting style it may be a leader shoulder.
+    seed_segment = min(
+        seeds,
+        key=lambda index: (
+            min(
+                _distance_to_box(segments[index][0], bounds),
+                _distance_to_box(segments[index][1], bounds),
+            ),
+            -segments[index][2],
+            index,
+        ),
+    )
 
     connected = set(seeds)
     frontier = sorted(seeds, reverse=True)
@@ -229,7 +244,24 @@ def _leader_target(
     if distance < max(18.0, diagonal * 0.008):
         return None
     confidence = min(0.9, 0.5 + distance / max(diagonal * 0.15, 1.0) * 0.35)
-    return [round(target[0], 3), round(target[1], 3)], round(confidence, 3)
+    first, second, segment_length = segments[seed_segment]
+    dx, dy = second[0] - first[0], second[1] - first[1]
+    direction = [dx / segment_length, dy / segment_length]
+    cardinality = max(abs(direction[0]), abs(direction[1]))
+    direction_confidence = min(
+        0.85,
+        0.4 + 0.25 * cardinality + 0.2 * min(1.0, segment_length / max(24.0, diagonal * 0.02)),
+    )
+    evidence = {
+        "adjacent_segment_pdf": [
+            [round(first[0], 3), round(first[1], 3)],
+            [round(second[0], 3), round(second[1], 3)],
+        ],
+        "dimension_direction_pdf": [round(direction[0], 6), round(direction[1], 6)],
+        "direction_confidence": round(direction_confidence, 3),
+        "connected_segment_count": len(connected),
+    }
+    return [round(target[0], 3), round(target[1], 3)], round(confidence, 3), evidence
 
 
 def bind_drawing_context(
@@ -275,9 +307,10 @@ def bind_drawing_context(
         )
         if target is None:
             continue
-        point, confidence = target
+        point, confidence, evidence = target
         entity["leader_target_pdf"] = point
         entity["context_confidence"] = confidence
+        entity.update(evidence)
         bound.append((entity, point, confidence))
 
     # Leader endpoints belonging to one projected view form compact spatial
@@ -564,6 +597,61 @@ def extract_drawing_entities(pdf_path: Path, page_number: int = 1) -> tuple[list
         )
         inspection_cache[item] = result
         return result
+
+    def is_inside_feature_control_frame(bounds: tuple[float, float, float, float]) -> bool:
+        """Detect one cell of a vector-drawn GD&T feature-control frame."""
+
+        left, bottom, right, top = bounds
+        tolerance = 2.5
+        horizontal = [
+            path
+            for path in graph["paths"]
+            if path.signature == "ml" and path.width >= right - left
+            and path.height <= tolerance
+        ]
+        vertical = [
+            path
+            for path in graph["paths"]
+            if path.signature == "ml" and path.height >= top - bottom
+            and path.width <= tolerance
+        ]
+        left_edges = [
+            path for path in vertical
+            if path.bounds[0] <= left + tolerance
+            and left - path.bounds[0] <= 80.0
+            and path.bounds[1] <= bottom + tolerance
+            and path.bounds[3] >= top - tolerance
+        ]
+        right_edges = [
+            path for path in vertical
+            if path.bounds[2] >= right - tolerance
+            and path.bounds[2] - right <= 80.0
+            and path.bounds[1] <= bottom + tolerance
+            and path.bounds[3] >= top - tolerance
+        ]
+        if not left_edges or not right_edges:
+            return False
+        for left_edge in left_edges:
+            for right_edge in right_edges:
+                frame_left = left_edge.bounds[0]
+                frame_right = right_edge.bounds[2]
+                if frame_right - frame_left < right - left:
+                    continue
+                lower = any(
+                    path.bounds[0] <= frame_left + tolerance
+                    and path.bounds[2] >= frame_right - tolerance
+                    and abs(path.bounds[1] - bottom) <= 18.0
+                    for path in horizontal
+                )
+                upper = any(
+                    path.bounds[0] <= frame_left + tolerance
+                    and path.bounds[2] >= frame_right - tolerance
+                    and abs(path.bounds[1] - top) <= 18.0
+                    for path in horizontal
+                )
+                if lower and upper:
+                    return True
+        return False
 
     source_items: list[TextItem] = []
     consumed: set[int] = set()
@@ -868,16 +956,47 @@ def extract_drawing_entities(pdf_path: Path, page_number: int = 1) -> tuple[list
         effective_font_size = max(item.font_size, 8.0)
         text_width = max(effective_font_size * 0.55 * len(item.text), 8.0)
         text_height = effective_font_size
+        text_bounds = (
+            item.x,
+            item.y - text_height * 0.25,
+            item.x + text_width,
+            item.y + text_height,
+        )
+        if standalone_small_number and is_inside_feature_control_frame(text_bounds):
+            parsed.update(
+                {
+                    "semantic_type": "gdt_feature_control_frame",
+                    "target_feature_type": "geometric_control",
+                    "comparison_eligible": False,
+                    "recognition_status": "numeric_cell_in_vector_frame",
+                    "confidence": max(float(parsed.get("confidence") or 0), 0.9),
+                }
+            )
+        elif nominal == 0 and any(
+            re.fullmatch(r"-[0-9]+(?:[.,][0-9]+)?", other.text.strip())
+            and abs(other.x - item.x) <= 8.0
+            and 4.0 <= abs(other.y - item.y) <= 30.0
+            for other in texts
+        ):
+            parsed.update(
+                {
+                    "semantic_type": "tolerance_fragment",
+                    "target_feature_type": "annotation_context",
+                    "comparison_eligible": False,
+                    "recognition_status": "detached_stacked_tolerance",
+                    "confidence": max(float(parsed.get("confidence") or 0), 0.9),
+                }
+            )
         entity = {
             "id": f"D2-{len(entities) + 1:03d}",
             "page": page_number,
             "raw_text": item.text,
             "anchor_pdf": [round(item.x, 3), round(item.y, 3)],
             "bbox_pdf": [
-                round(item.x, 3),
-                round(item.y - text_height * 0.25, 3),
-                round(item.x + text_width, 3),
-                round(item.y + text_height, 3),
+                round(text_bounds[0], 3),
+                round(text_bounds[1], 3),
+                round(text_bounds[2], 3),
+                round(text_bounds[3], 3),
             ],
             "view_id": "PAGE_1_UNASSIGNED",
             "status": "unbound",
@@ -898,6 +1017,25 @@ def extract_drawing_entities(pdf_path: Path, page_number: int = 1) -> tuple[list
             continue
         if item.x > page_width * 0.82 and item.y < page_height * 0.58:
             continue
+        aligned_parent = min(
+            (
+                (
+                    math.dist(
+                        (item.x, item.y),
+                        tuple(float(value) for value in entity.get("anchor_pdf", [0, 0])),
+                    ),
+                    entity,
+                )
+                for entity in entities
+                if entity.get("comparison_eligible") is not False
+                and entity.get("semantic_type") in {"linear_dimension", "radius"}
+                and int(entity.get("quantity") or 1) == 1
+                and abs(float((entity.get("anchor_pdf") or [0, 0])[1]) - item.y) <= 30.0
+                and abs(float((entity.get("anchor_pdf") or [0, 0])[0]) - item.x) <= 240.0
+            ),
+            key=lambda candidate: candidate[0],
+            default=None,
+        )
         nearest = min(
             (
                 (
@@ -913,7 +1051,23 @@ def extract_drawing_entities(pdf_path: Path, page_number: int = 1) -> tuple[list
             key=lambda candidate: candidate[0],
             default=None,
         )
-        parent_id = nearest[1]["id"] if nearest and nearest[0] <= 90.0 else None
+        has_near_parent = bool(nearest and nearest[0] <= 90.0)
+        use_aligned_parent = aligned_parent is not None and not has_near_parent
+        parent = (
+            nearest[1]
+            if has_near_parent
+            else aligned_parent[1]
+            if use_aligned_parent
+            else None
+        )
+        parent_id = parent["id"] if parent else None
+        if use_aligned_parent:
+            parent["quantity"] = int(quantity_match.group(1))
+            parent["quantity_binding"] = {
+                "method": "same_baseline_detached_multiplier",
+                "source_anchor_pdf": [round(item.x, 3), round(item.y, 3)],
+                "distance_pdf": round(float(aligned_parent[0]), 3),
+            }
         entities.append(
             {
                 "id": f"D2-{len(entities) + 1:03d}",

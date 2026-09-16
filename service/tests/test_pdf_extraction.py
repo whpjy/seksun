@@ -293,6 +293,50 @@ def test_border_index_row_is_quarantined_with_audit_reason(tmp_path):
     assert {item["reason"] for item in diagnostics["excluded_candidates"]} == {"drawing_border_index_row"}
 
 
+def test_thread_annotation_and_filename_fallback_are_review_only(tmp_path):
+    text_pdf = tmp_path / "thread-callout.pdf"
+    writer = PdfWriter()
+    page = writer.add_blank_page(width=500, height=400)
+    font = DictionaryObject({
+        NameObject("/Type"): NameObject("/Font"),
+        NameObject("/Subtype"): NameObject("/Type1"),
+        NameObject("/BaseFont"): NameObject("/Helvetica"),
+    })
+    page[NameObject("/Resources")] = DictionaryObject({
+        NameObject("/Font"): DictionaryObject({NameObject("/F1"): writer._add_object(font)}),
+    })
+    content = DecodedStreamObject()
+    content.set_data(
+        b"BT /F1 10 Tf 1 0 0 1 100 200 Tm (3/4-16 UNF-2A) Tj ET\n"
+        b"BT /F1 10 Tf 1 0 0 1 114 200 Tm (3/4-16 UNF-2A) Tj ET\n"
+        b"BT /F1 10 Tf 1 0 0 1 128 200 Tm (3/4-16 UNF-2A) Tj ET\n"
+    )
+    page[NameObject("/Contents")] = writer._add_object(content)
+    with text_pdf.open("wb") as stream:
+        writer.write(stream)
+
+    entities, _ = extract_drawing_entities(text_pdf)
+    thread = next(item for item in entities if item["semantic_type"] == "thread")
+    assert sum(item["semantic_type"] == "thread" for item in entities) == 1
+    assert thread["parameter"] == "3/4-16 UNF-2A"
+    assert thread["source_method"] == "pypdf_text_object"
+    assert thread["comparison_eligible"] is False
+    assert thread["duplicate_source_count"] == 3
+    assert len(thread["duplicate_source_anchors_pdf"]) == 3
+
+    filename_pdf = tmp_path / "BUQD0292 3 4-16 UNF.pdf"
+    writer = PdfWriter()
+    writer.add_blank_page(width=500, height=400)
+    with filename_pdf.open("wb") as stream:
+        writer.write(stream)
+    entities, _ = extract_drawing_entities(filename_pdf)
+    fallback = next(item for item in entities if item["semantic_type"] == "thread")
+    assert fallback["parameter"] == "3/4-16 UNF"
+    assert fallback["source_method"] == "pdf_filename_metadata"
+    assert fallback["confidence"] == 0.45
+    assert fallback["recognition_status"] == "filename_metadata_requires_drawing_confirmation"
+
+
 def test_split_iso_annotations_are_assembled_and_semantically_retained(tmp_path):
     pdf = tmp_path / "split-annotations.pdf"
     writer = PdfWriter()

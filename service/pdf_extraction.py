@@ -403,6 +403,64 @@ def _parse_number(value: str | None) -> float | None:
         return None
 
 
+def _parse_thread_annotation(text: str) -> dict[str, Any] | None:
+    raw = " ".join(text.replace("－", "-").replace("–", "-").split()).strip()
+    unified = re.search(
+        r"(?<!\d)(?:(?P<whole>\d+)\s+)?(?P<num>\d+)\s*/\s*(?P<den>\d+)\s*-\s*"
+        r"(?P<tpi>\d+(?:\.\d+)?)\s*(?P<series>UNF|UNC|UNEF)"
+        r"(?:\s*-?\s*(?P<class>[123][AB]))?\b",
+        raw,
+        re.IGNORECASE,
+    )
+    if unified is None:
+        unified = re.search(
+            r"(?<!\d)(?P<num>\d+)\s+(?P<den>\d+)\s*-\s*"
+            r"(?P<tpi>\d+(?:\.\d+)?)\s*(?P<series>UNF|UNC|UNEF)"
+            r"(?:\s*-?\s*(?P<class>[123][AB]))?\b",
+            raw,
+            re.IGNORECASE,
+        )
+    if unified:
+        groups = unified.groupdict()
+        denominator = int(groups["den"])
+        if denominator <= 0:
+            return None
+        whole = int(groups.get("whole") or 0)
+        numerator = int(groups["num"])
+        nominal_size = f"{whole} {numerator}/{denominator}" if whole else f"{numerator}/{denominator}"
+        designation = f"{nominal_size}-{float(groups['tpi']):g} {groups['series'].upper()}"
+        if groups.get("class"):
+            designation += f"-{groups['class'].upper()}"
+        return {
+            "semantic_type": "thread",
+            "subtype": groups["series"].upper(),
+            "nominal": None,
+            "unit": None,
+            "quantity": 1,
+            "parameter": designation,
+            "target_feature_type": "threaded_cylinder",
+            "confidence": 0.96,
+            "comparison_eligible": False,
+            "recognition_status": "thread_semantics_recognized_geometry_binding_required",
+        }
+    pipe = re.search(r"(?<![A-Z])G\s*(?P<num>\d+)\s*/\s*(?P<den>\d+)\b", raw, re.IGNORECASE)
+    if pipe:
+        designation = f"G{int(pipe.group('num'))}/{int(pipe.group('den'))}"
+        return {
+            "semantic_type": "thread",
+            "subtype": "BSPP",
+            "nominal": None,
+            "unit": None,
+            "quantity": 1,
+            "parameter": designation,
+            "target_feature_type": "threaded_cylinder",
+            "confidence": 0.94,
+            "comparison_eligible": False,
+            "recognition_status": "thread_semantics_recognized_geometry_binding_required",
+        }
+    return None
+
+
 def _parse_annotation(text: str) -> dict[str, Any] | None:
     """Parse one first-page text object into a conservative engineering entity.
 
@@ -415,6 +473,10 @@ def _parse_annotation(text: str) -> dict[str, Any] | None:
     compact = re.sub(r"\s+", "", raw).replace("⌀", "Ø").replace("ø", "Ø")
     if not compact or len(compact) > 96:
         return None
+
+    thread = _parse_thread_annotation(raw)
+    if thread is not None:
+        return thread
 
     if re.fullmatch(r"(?:STAMPING|PUNCHING)DIRECTION", compact, re.IGNORECASE):
         return {
@@ -1130,6 +1192,53 @@ def extract_drawing_entities(pdf_path: Path, page_number: int = 1) -> tuple[list
                 "skip_context_binding": True,
             }
         )
+
+    filename_thread = _parse_thread_annotation(pdf_path.stem)
+    if filename_thread is not None and not any(
+        item.get("semantic_type") == "thread"
+        and item.get("parameter") == filename_thread.get("parameter")
+        for item in entities
+    ):
+        filename_thread.update({
+            "confidence": 0.45,
+            "recognition_status": "filename_metadata_requires_drawing_confirmation",
+        })
+        entities.append({
+            "id": f"D2-{len(entities) + 1:03d}",
+            "page": page_number,
+            "raw_text": str(filename_thread["parameter"]),
+            "anchor_pdf": [0.0, 0.0],
+            "bbox_pdf": [0.0, 0.0, 0.0, 0.0],
+            "view_id": "PDF_FILENAME_METADATA",
+            "status": "context_only",
+            "source_method": "pdf_filename_metadata",
+            "font_size": 0.0,
+            "skip_context_binding": True,
+            **filename_thread,
+        })
+
+    deduplicated_entities: list[dict[str, Any]] = []
+    for entity in entities:
+        if entity.get("semantic_type") != "thread":
+            deduplicated_entities.append(entity)
+            continue
+        anchor = entity.get("anchor_pdf") or [0.0, 0.0]
+        duplicate = next((
+            existing for existing in deduplicated_entities
+            if existing.get("semantic_type") == "thread"
+            and existing.get("parameter") == entity.get("parameter")
+            and existing.get("raw_text") == entity.get("raw_text")
+            and abs(float((existing.get("anchor_pdf") or [0.0, 0.0])[1]) - float(anchor[1])) <= 2.0
+            and abs(float((existing.get("anchor_pdf") or [0.0, 0.0])[0]) - float(anchor[0])) <= 40.0
+        ), None)
+        if duplicate is None:
+            entity["duplicate_source_count"] = 1
+            entity["duplicate_source_anchors_pdf"] = [list(anchor)]
+            deduplicated_entities.append(entity)
+            continue
+        duplicate["duplicate_source_count"] = int(duplicate.get("duplicate_source_count") or 1) + 1
+        duplicate.setdefault("duplicate_source_anchors_pdf", []).append(list(anchor))
+    entities = deduplicated_entities
 
     diagnostics = {
         "page": page_number,
